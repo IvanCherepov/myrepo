@@ -1,1 +1,1 @@
-FROM ubuntu
+FROM quay.io/ivancherepov/myfirstrepo
