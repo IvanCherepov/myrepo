@@ -1,1 +1,1 @@
-FROM quay.io/ivancherepov/myfirstrepo
+FROM quay.io/ivancherepov/test-base
