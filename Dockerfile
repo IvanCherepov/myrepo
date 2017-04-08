@@ -1,1 +1,1 @@
-FROM quay.io/ivancherepov/mydockerrepo
+FROM quay.io/ivancherepov/git-server
