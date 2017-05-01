@@ -1,0 +1,53 @@
+---
+output: html_document
+params:
+    file:
+        value: x
+    set_title:
+        value: x
+title: '`r params$set_title`'
+date: '`r strftime(Sys.time(), format = "%B %d, %Y")`'
+---
+
+```{r, include=FALSE}
+library(knitr)
+opts_chunk$set(fig.height = 6, fig.width = 8, fig.align = 'center', echo = FALSE)
+library(scater)
+d <- readRDS(paste0("scater-objects/", params$file))
+cell_types <- sort(colnames(pData(d))[grepl("cell_type", colnames(pData(d)))])
+```
+
+## QC of library size and detected genes
+
+```{r}
+if(!is.null(d$total_counts) & !is.null(d$total_features)) {
+    for(ct in cell_types) {
+        print(plotPhenoData(d, aes_string(x = "total_counts", y = "total_features", colour = ct)))
+    }
+}
+```
+
+```{r}
+if(!is.null(d$total_counts) & !is.null(d$total_features)) {
+    for(ct in cell_types) {
+        print(plotPhenoData(d, aes_string(x = ct, y = "total_features", colour = "log10_total_counts")) + theme(axis.text.x = element_text(angle = 90, hjust = 1)))
+    }
+}
+```
+
+## QC of expression
+
+```{r, message=FALSE, warning=FALSE}
+plotQC(d, type = "highest-expression")
+```
+
+```{r}
+plotQC(d, type = "exprs-freq-vs-mean")
+```
+
+## PCA plot
+```{r}
+for(ct in cell_types) {
+    print(plotPCA(d, colour_by = ct))
+}
+```
