@@ -1,0 +1,117 @@
+#!/usr/bin/env ruby
+
+require 'linguist'
+require 'find'
+require 'json'
+require 'shellwords'
+require 'English'
+
+config_file = ENV['CONFIG_FILE'] || '/config.json'
+config = JSON.parse(File.read(config_file))
+
+exit unless config.fetch('enabled', true)
+
+options = config.fetch('config', {})
+
+
+BOOLEAN_OPTIONS = %w(allow_defined allow_defined_top compat module)
+
+truthy_value = ->(value) do
+  case value
+  when true, 'true'
+    value
+  when false, 'false'
+    false
+  end
+end
+
+boolean_options = BOOLEAN_OPTIONS.map do |name|
+  option = "--#{name.tr('_', '-')}"
+  value = options.fetch(name, { 'enabled' => 'false' })
+
+  case value
+  when Hash
+    option if truthy_value.(value.fetch('enabled', false))
+  when truthy_value.(value)
+    option
+  end
+end
+
+CHECK_OPTIONS = %w(global unused redefined unused_args unused_secondaries self)
+checks = config.fetch('checks', {})
+
+check_options = CHECK_OPTIONS.map do |name|
+  option = "--no-#{name.tr('_', '-')}"
+  check = checks.delete(name) || { 'enabled' => true }
+
+  option unless check.fetch('enabled', true)
+end
+
+ignore = options['ignore'] ||= []
+enable = options['enable'] ||= []
+
+checks.each do |name, value|
+  warn "check: #{name} => #{value}"
+  case name
+  when /\A(?:LC)?(?<pattern>.+)\z/
+    enabled = value.fetch('enabled', true)
+    (enabled ? enable : ignore) << $LAST_MATCH_INFO[:pattern]
+  else
+    warn "unknown check: #{name}"
+  end
+end
+
+ARRAY_OPTIONS = %w(globals read_globals new_globals new_read_globals not_globals ignore enable only)
+
+array_options = ARRAY_OPTIONS.map do |name|
+  values = options.fetch(name, [])
+
+  next if values.empty?
+
+  [ "--#{name.tr('_', '-')}", values ]
+end
+
+std = options.fetch('std', [])
+
+if std.any?
+  array_options << ['--std', std.join('+') ]
+end
+
+include_paths = config.fetch('include_paths', %w(.))
+
+Lua = Linguist::Language.find_by_name('Lua')
+
+files = []
+
+existing_paths = include_paths.select(&File.method(:exist?))
+
+missing_paths = include_paths - existing_paths
+
+unless missing_paths.empty?
+  warn "Ignoring paths: #{missing_paths.join(' ')}"
+end
+
+Find.find(*existing_paths) do |path|
+  next unless FileTest.file?(path)
+
+  blob = Linguist::FileBlob.new(path)
+
+  begin
+    language = Linguist.detect(blob)
+    case language
+    when Lua
+      files << path
+    end
+  rescue ArgumentError => error
+    warn "#{error} when detecting language of: #{path}"
+  end
+end
+
+cmd = ['luacheck', *check_options.compact, *boolean_options.compact, *array_options.compact.flatten, '--formatter', 'codeclimate', *files ]
+warn Shellwords.join(cmd)
+
+IO.popen(cmd) do |io|
+  while (line = io.gets)
+    STDOUT.print line
+  end
+end
