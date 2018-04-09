@@ -1,6 +1,5 @@
 FROM alpine:3.7
 
-MAINTAINER Michal Cichra <michal@cichra.cz>
 ENV LUA_VERSION 5.3
 ENV LUACHECK_VERSION 0.21.2
 
