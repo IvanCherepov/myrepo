@@ -1,8 +1,5 @@
 FROM alpine:3.7
 
-ENV LUA_VERSION 5.3
-ENV LUACHECK_VERSION 0.21.2
-
 WORKDIR /tmp
 COPY Gemfile* /tmp/
 RUN adduser -D -H -h /code -u 9000 -s /bin/false app \
