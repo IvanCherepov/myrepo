@@ -1,29 +1,26 @@
-FROM python:2.7.13
+FROM alpine:3.7
 
-ENV LANG="en_US.UTF-8" PYTHONPATH="." TERM="xterm"
+LABEL maintainer "Michal Cichra <michal@cichra.cz>"
+ENV LUA_VERSION=5.3 LUACHECK_VERSION=0.21.2
 
-# Main deps
-RUN apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-libmemcached-dev \
-libffi-dev \
-libffi6 \
-libxml2 \
-libxml2-dev \
-libjpeg-dev \
-libmagic1 \
-postgresql-client \
-locales \
-&& sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
-echo 'LANG="en_US.UTF-8"'>/etc/default/locale && \
-dpkg-reconfigure --frontend=noninteractive locales && \
-update-locale LANG=en_US.UTF-8 \
-&& mkdir -p /usr/src/app
+WORKDIR /tmp
+COPY Gemfile* /tmp/
+RUN adduser -D -H -h /code -u 9000 -s /bin/false app \
+ && apk add --no-cache luarocks${LUA_VERSION} ruby-bundler ruby-json icu-libs zlib openssl \
+ && apk add --no-cache --virtual build-dependencies \
+                       lua${LUA_VERSION}-dev build-base curl ruby-dev icu-dev zlib-dev openssl-dev cmake \
+ && luarocks-${LUA_VERSION} install luacheck ${LUACHECK_VERSION} \
+ && luarocks-${LUA_VERSION} install lua-cjson \
+ && BUNDLE_SILENCE_ROOT_WARNING=1 bundle install --system \
+ && apk del build-dependencies \
+ && ln -s $(which lua${LUA_VERSION}) /usr/local/bin/lua
 
-# App deps
-COPY requirements.txt /usr/src/app/
-RUN pip install -U -r /usr/src/app/requirements.txt
-WORKDIR /usr/src/app
+USER app
+VOLUME /code
+WORKDIR /code
 
-# Copy the rest of the app
-COPY . /usr/src/app
-RUN bash -l -c 'echo export GIT_RELEASE="$(git rev-parse HEAD)" >> /etc/bash.bashrc'
+COPY engine.json /
+COPY bin /usr/local/bin/
+COPY lib /usr/local/share/lua/${LUA_VERSION}/
+
+CMD ["engine-luacheck"]

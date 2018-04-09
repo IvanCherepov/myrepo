@@ -1,7 +1,0 @@
-{
-  "env": {
-    "node": true
-  },
-  "extends": ["semistandard", "standard-react"],
-  "parser": "babel-eslint"
-}
