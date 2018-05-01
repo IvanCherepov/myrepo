@@ -76,6 +76,3 @@ engines:
 make build test integration
 ```
 
-Adding two lines just for testing purposes
-Second
-
