@@ -3,7 +3,7 @@ COPY package.json ./
 
 RUN npm set progress=false && npm config set depth 0 && npm cache clean --force
 
-RUN mkdir /ng-app && cp -R ./node_modules ./ng-app
+RUN npm install && mkdir /ng-app && cp -R ./node_modules ./ng-app
 
 WORKDIR /ng-app
 
