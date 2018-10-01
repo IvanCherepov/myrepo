@@ -1,2 +1,7 @@
-FROM quay.io/ivancherepov/test-base:latest
-MAINTAINER hez@hez.com
+FROM busybox
+
+WORKDIR /app
+
+RUN touch foo
+RUN touch bar
+RUN date > when
