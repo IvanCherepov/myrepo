@@ -19,7 +19,6 @@ import (
 	"bufio"
 	"bytes"
 
-	"github.com/deckarep/golang-set"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/coreos/clair/database"
@@ -30,65 +29,64 @@ import (
 )
 
 func init() {
-	featurefmt.RegisterLister("apk", "1.0", &lister{})
+	featurefmt.RegisterLister("apk", &lister{})
 }
 
 type lister struct{}
 
-func valid(pkg *database.Feature) bool {
-	return pkg.Name != "" && pkg.Version != ""
-}
-
-func (l lister) ListFeatures(files tarutil.FilesMap) ([]database.LayerFeature, error) {
+func (l lister) ListFeatures(files tarutil.FilesMap) ([]database.FeatureVersion, error) {
 	file, exists := files["lib/apk/db/installed"]
 	if !exists {
-		return []database.LayerFeature{}, nil
+		return []database.FeatureVersion{}, nil
 	}
 
 	// Iterate over each line in the "installed" file attempting to parse each
 	// package into a feature that will be stored in a set to guarantee
 	// uniqueness.
-	packages := mapset.NewSet()
-	pkg := database.Feature{VersionFormat: dpkg.ParserName}
+	pkgSet := make(map[string]database.FeatureVersion)
+	ipkg := database.FeatureVersion{}
 	scanner := bufio.NewScanner(bytes.NewBuffer(file))
 	for scanner.Scan() {
 		line := scanner.Text()
 		if len(line) < 2 {
-			if valid(&pkg) {
-				pkg.Type = database.BinaryPackage
-				packages.Add(pkg)
-				pkg = database.Feature{VersionFormat: dpkg.ParserName}
-			}
 			continue
 		}
 
 		// Parse the package name or version.
-		// Alpine package doesn't have specific source package. The "origin"
-		// package is sub package.
-		switch line[:2] {
-		case "P:":
-			pkg.Name = line[2:]
-		case "V:":
+		switch {
+		case line[:2] == "P:":
+			ipkg.Feature.Name = line[2:]
+		case line[:2] == "V:":
 			version := string(line[2:])
 			err := versionfmt.Valid(dpkg.ParserName, version)
 			if err != nil {
 				log.WithError(err).WithField("version", version).Warning("could not parse package version. skipping")
-				continue
 			} else {
-				pkg.Version = version
+				ipkg.Version = version
 			}
+		case line == "":
+			// Restart if the parser reaches another package definition before
+			// creating a valid package.
+			ipkg = database.FeatureVersion{}
+		}
+
+		// If we have a whole feature, store it in the set and try to parse a new
+		// one.
+		if ipkg.Feature.Name != "" && ipkg.Version != "" {
+			pkgSet[ipkg.Feature.Name+"#"+ipkg.Version] = ipkg
+			ipkg = database.FeatureVersion{}
 		}
 	}
 
-	// in case of no terminal line
-	if valid(&pkg) {
-		pkg.Type = database.BinaryPackage
-		packages.Add(pkg)
+	// Convert the map into a slice.
+	pkgs := make([]database.FeatureVersion, 0, len(pkgSet))
+	for _, pkg := range pkgSet {
+		pkgs = append(pkgs, pkg)
 	}
 
-	return database.ConvertFeatureSetToLayerFeatures(packages), nil
+	return pkgs, nil
 }
 
 func (l lister) RequiredFilenames() []string {
-	return []string{"^lib/apk/db/installed"}
+	return []string{"lib/apk/db/installed"}
 }

@@ -1,4 +1,4 @@
-// Copyright 2018 clair authors
+// Copyright 2017 clair authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,10 +30,9 @@ import (
 	"github.com/coreos/clair"
 	"github.com/coreos/clair/api"
 	"github.com/coreos/clair/database"
-	"github.com/coreos/clair/ext/vulnsrc"
+	"github.com/coreos/clair/ext/imagefmt"
 	"github.com/coreos/clair/pkg/formatter"
 	"github.com/coreos/clair/pkg/stopper"
-	"github.com/coreos/clair/pkg/strutil"
 
 	// Register database driver.
 	_ "github.com/coreos/clair/database/pgsql"
@@ -55,21 +54,8 @@ import (
 	_ "github.com/coreos/clair/ext/vulnsrc/debian"
 	_ "github.com/coreos/clair/ext/vulnsrc/oracle"
 	_ "github.com/coreos/clair/ext/vulnsrc/rhel"
-	_ "github.com/coreos/clair/ext/vulnsrc/suse"
 	_ "github.com/coreos/clair/ext/vulnsrc/ubuntu"
 )
-
-// MaxDBConnectionAttempts is the total number of tries that Clair will use to
-// initially connect to a database at start-up.
-const MaxDBConnectionAttempts = 20
-
-// BinaryDependencies are the programs that Clair expects to be on the $PATH
-// because it creates subprocesses of these programs.
-var BinaryDependencies = []string{
-	"git",
-	"rpm",
-	"xz",
-}
 
 func waitForSignals(signals ...os.Signal) {
 	interrupts := make(chan os.Signal, 1)
@@ -99,46 +85,25 @@ func stopCPUProfiling(f *os.File) {
 	log.Info("stopped CPU profiling")
 }
 
-func configClairVersion(config *Config) {
-	clair.EnabledUpdaters = strutil.Intersect(config.Updater.EnabledUpdaters, vulnsrc.ListUpdaters())
-
-	log.WithFields(log.Fields{
-		"Detectors": database.SerializeDetectors(clair.EnabledDetectors()),
-		"Updaters":  clair.EnabledUpdaters,
-	}).Info("enabled Clair extensions")
-}
-
 // Boot starts Clair instance with the provided config.
 func Boot(config *Config) {
 	rand.Seed(time.Now().UnixNano())
 	st := stopper.NewStopper()
 
 	// Open database
-	var db database.Datastore
-	var dbError error
-	for attempts := 1; attempts <= MaxDBConnectionAttempts; attempts++ {
-		db, dbError = database.Open(config.Database)
-		if dbError == nil {
-			break
-		}
-		log.WithError(dbError).Error("failed to connect to database")
-		time.Sleep(time.Duration(attempts) * time.Second)
+	db, err := database.Open(config.Database)
+	if err != nil {
+		log.Fatal(err)
 	}
-	if dbError != nil {
-		log.Fatal(dbError)
-	}
-
 	defer db.Close()
-
-	clair.RegisterConfiguredDetectors(db)
 
 	// Start notifier
 	st.Begin()
 	go clair.RunNotifier(config.Notifier, db, st)
 
 	// Start API
-	go api.Run(config.API, db)
-
+	st.Begin()
+	go api.Run(config.API, db, st)
 	st.Begin()
 	go api.RunHealth(config.API, db, st)
 
@@ -152,47 +117,46 @@ func Boot(config *Config) {
 	st.Stop()
 }
 
-// Initialize logging system
-func configureLogger(flagLogLevel *string) {
-	logLevel, err := log.ParseLevel(strings.ToUpper(*flagLogLevel))
-	if err != nil {
-		log.WithError(err).Error("failed to set logger parser level")
-	}
-
-	log.SetLevel(logLevel)
-	log.SetOutput(os.Stdout)
-	log.SetFormatter(&formatter.JSONExtendedFormatter{ShowLn: true})
-}
-
 func main() {
 	// Parse command-line arguments
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	flagConfigPath := flag.String("config", "/etc/clair/config.yaml", "Load configuration from the specified file.")
 	flagCPUProfilePath := flag.String("cpu-profile", "", "Write a CPU profile to the specified file before exiting.")
 	flagLogLevel := flag.String("log-level", "info", "Define the logging level.")
+	flagInsecureTLS := flag.Bool("insecure-tls", false, "Disable TLS server's certificate chain and hostname verification when pulling layers.")
 	flag.Parse()
 
-	configureLogger(flagLogLevel)
 	// Check for dependencies.
-	for _, bin := range BinaryDependencies {
+	for _, bin := range []string{"git", "rpm", "xz"} {
 		_, err := exec.LookPath(bin)
 		if err != nil {
 			log.WithError(err).WithField("dependency", bin).Fatal("failed to find dependency")
 		}
 	}
 
+	// Load configuration
 	config, err := LoadConfig(*flagConfigPath)
 	if err != nil {
 		log.WithError(err).Fatal("failed to load configuration")
 	}
+
+	// Initialize logging system
+
+	logLevel, err := log.ParseLevel(strings.ToUpper(*flagLogLevel))
+	log.SetLevel(logLevel)
+	log.SetOutput(os.Stdout)
+	log.SetFormatter(&formatter.JSONExtendedFormatter{ShowLn: true})
 
 	// Enable CPU Profiling if specified
 	if *flagCPUProfilePath != "" {
 		defer stopCPUProfiling(startCPUProfiling(*flagCPUProfilePath))
 	}
 
-	// configure updater and worker
-	configClairVersion(config)
+	// Enable TLS server's certificate chain and hostname verification
+	// when pulling layers if specified
+	if *flagInsecureTLS {
+		imagefmt.SetInsecureTLS(*flagInsecureTLS)
+	}
 
 	Boot(config)
 }

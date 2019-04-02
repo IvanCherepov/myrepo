@@ -30,83 +30,105 @@ func TestDebianParser(t *testing.T) {
 	_, filename, _, _ := runtime.Caller(0)
 
 	// Test parsing testdata/fetcher_debian_test.json
-	testFile, _ := os.Open(filepath.Join(filepath.Dir(filename), "/testdata/fetcher_debian_test.json"))
+	testFile, _ := os.Open(filepath.Join(filepath.Dir(filename)) + "/testdata/fetcher_debian_test.json")
 	response, err := buildResponse(testFile, "")
-	if assert.Nil(t, err) && assert.Len(t, response.Vulnerabilities, 2) {
+	if assert.Nil(t, err) && assert.Len(t, response.Vulnerabilities, 3) {
 		for _, vulnerability := range response.Vulnerabilities {
 			if vulnerability.Name == "CVE-2015-1323" {
 				assert.Equal(t, "https://security-tracker.debian.org/tracker/CVE-2015-1323", vulnerability.Link)
 				assert.Equal(t, database.LowSeverity, vulnerability.Severity)
 				assert.Equal(t, "This vulnerability is not very dangerous.", vulnerability.Description)
 
-				expectedFeatures := []database.AffectedFeature{
+				expectedFeatureVersions := []database.FeatureVersion{
 					{
-						FeatureType: affectedType,
-						Namespace: database.Namespace{
-							Name:          "debian:8",
-							VersionFormat: dpkg.ParserName,
+						Feature: database.Feature{
+							Namespace: database.Namespace{
+								Name:          "debian:8",
+								VersionFormat: dpkg.ParserName,
+							},
+							Name: "aptdaemon",
 						},
-						FeatureName:     "aptdaemon",
-						AffectedVersion: versionfmt.MaxVersion,
+						Version: versionfmt.MaxVersion,
 					},
 					{
-						FeatureType: affectedType,
-						Namespace: database.Namespace{
-							Name:          "debian:unstable",
-							VersionFormat: dpkg.ParserName,
+						Feature: database.Feature{
+							Namespace: database.Namespace{
+								Name:          "debian:unstable",
+								VersionFormat: dpkg.ParserName,
+							},
+							Name: "aptdaemon",
 						},
-						FeatureName:     "aptdaemon",
-						AffectedVersion: "1.1.1+bzr982-1",
-						FixedInVersion:  "1.1.1+bzr982-1",
+						Version: "1.1.1+bzr982-1",
 					},
 				}
 
-				for _, expectedFeature := range expectedFeatures {
-					assert.Contains(t, vulnerability.Affected, expectedFeature)
+				for _, expectedFeatureVersion := range expectedFeatureVersions {
+					assert.Contains(t, vulnerability.FixedIn, expectedFeatureVersion)
 				}
 			} else if vulnerability.Name == "CVE-2003-0779" {
 				assert.Equal(t, "https://security-tracker.debian.org/tracker/CVE-2003-0779", vulnerability.Link)
 				assert.Equal(t, database.HighSeverity, vulnerability.Severity)
 				assert.Equal(t, "But this one is very dangerous.", vulnerability.Description)
 
-				expectedFeatures := []database.AffectedFeature{
+				expectedFeatureVersions := []database.FeatureVersion{
 					{
-						FeatureType: affectedType,
-						Namespace: database.Namespace{
-							Name:          "debian:8",
-							VersionFormat: dpkg.ParserName,
+						Feature: database.Feature{
+							Namespace: database.Namespace{
+								Name:          "debian:8",
+								VersionFormat: dpkg.ParserName,
+							},
+							Name: "aptdaemon",
 						},
-						FeatureName:     "aptdaemon",
-						FixedInVersion:  "0.7.0",
-						AffectedVersion: "0.7.0",
+						Version: "0.7.0",
 					},
 					{
-						FeatureType: affectedType,
-						Namespace: database.Namespace{
-							Name:          "debian:unstable",
-							VersionFormat: dpkg.ParserName,
+						Feature: database.Feature{
+							Namespace: database.Namespace{
+								Name:          "debian:unstable",
+								VersionFormat: dpkg.ParserName,
+							},
+							Name: "aptdaemon",
 						},
-						FeatureName:     "aptdaemon",
-						FixedInVersion:  "0.7.0",
-						AffectedVersion: "0.7.0",
+						Version: "0.7.0",
 					},
 					{
-						FeatureType: affectedType,
-						Namespace: database.Namespace{
-							Name:          "debian:8",
-							VersionFormat: dpkg.ParserName,
+						Feature: database.Feature{
+							Namespace: database.Namespace{
+								Name:          "debian:8",
+								VersionFormat: dpkg.ParserName,
+							},
+							Name: "asterisk",
 						},
-						FeatureName:     "asterisk",
-						FixedInVersion:  "0.5.56",
-						AffectedVersion: "0.5.56",
+						Version: "0.5.56",
 					},
 				}
 
-				for _, expectedFeature := range expectedFeatures {
-					assert.Contains(t, vulnerability.Affected, expectedFeature)
+				for _, expectedFeatureVersion := range expectedFeatureVersions {
+					assert.Contains(t, vulnerability.FixedIn, expectedFeatureVersion)
+				}
+			} else if vulnerability.Name == "CVE-2013-2685" {
+				assert.Equal(t, "https://security-tracker.debian.org/tracker/CVE-2013-2685", vulnerability.Link)
+				assert.Equal(t, database.NegligibleSeverity, vulnerability.Severity)
+				assert.Equal(t, "Un-affected packages.", vulnerability.Description)
+
+				expectedFeatureVersions := []database.FeatureVersion{
+					{
+						Feature: database.Feature{
+							Namespace: database.Namespace{
+								Name:          "debian:8",
+								VersionFormat: dpkg.ParserName,
+							},
+							Name: "asterisk",
+						},
+						Version: versionfmt.MinVersion,
+					},
+				}
+
+				for _, expectedFeatureVersion := range expectedFeatureVersions {
+					assert.Contains(t, vulnerability.FixedIn, expectedFeatureVersion)
 				}
 			} else {
-				assert.Fail(t, "Wrong vulnerability name: ", vulnerability.Namespace.Name+":"+vulnerability.Name)
+				assert.Fail(t, "Wrong vulnerability name: ", vulnerability.ID)
 			}
 		}
 	}

@@ -17,7 +17,7 @@
 package debian
 
 import (
-	"crypto/sha256"
+	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -38,7 +38,6 @@ const (
 	url          = "https://security-tracker.debian.org/tracker/data/json"
 	cveURLPrefix = "https://security-tracker.debian.org/tracker"
 	updaterFlag  = "debianUpdater"
-	affectedType = database.SourcePackage
 )
 
 type jsonData map[string]map[string]jsonVuln
@@ -62,14 +61,6 @@ func init() {
 
 func (u *updater) Update(datastore database.Datastore) (resp vulnsrc.UpdateResponse, err error) {
 	log.WithField("package", "Debian").Info("Start fetching vulnerabilities")
-	latestHash, ok, err := database.FindKeyValueAndRollback(datastore, updaterFlag)
-	if err != nil {
-		return
-	}
-
-	if !ok {
-		latestHash = ""
-	}
 
 	// Download JSON.
 	r, err := httputil.GetWithUserAgent(url)
@@ -77,12 +68,17 @@ func (u *updater) Update(datastore database.Datastore) (resp vulnsrc.UpdateRespo
 		log.WithError(err).Error("could not download Debian's update")
 		return resp, commonerr.ErrCouldNotDownload
 	}
-
 	defer r.Body.Close()
 
 	if !httputil.Status2xx(r) {
 		log.WithField("StatusCode", r.StatusCode).Error("Failed to update Debian")
 		return resp, commonerr.ErrCouldNotDownload
+	}
+
+	// Get the SHA-1 of the latest update's JSON data
+	latestHash, err := datastore.GetKeyValue(updaterFlag)
+	if err != nil {
+		return resp, err
 	}
 
 	// Parse the JSON.
@@ -107,9 +103,9 @@ func buildResponse(jsonReader io.Reader, latestKnownHash string) (resp vulnsrc.U
 		}
 	}()
 
-	// Create a TeeReader so that we can unmarshal into JSON and write to a hash
+	// Create a TeeReader so that we can unmarshal into JSON and write to a SHA-1
 	// digest at the same time.
-	jsonSHA := sha256.New()
+	jsonSHA := sha1.New()
 	teedJSONReader := io.TeeReader(jsonReader, jsonSHA)
 
 	// Unmarshal JSON.
@@ -123,7 +119,7 @@ func buildResponse(jsonReader io.Reader, latestKnownHash string) (resp vulnsrc.U
 	// Calculate the hash and skip updating if the hash has been seen before.
 	hash = hex.EncodeToString(jsonSHA.Sum(nil))
 	if latestKnownHash == hash {
-		log.WithField("package", "Debian").Debug("no update, skip")
+		log.WithField("package", "Debian").Debug("no update")
 		return resp, nil
 	}
 
@@ -141,8 +137,8 @@ func buildResponse(jsonReader io.Reader, latestKnownHash string) (resp vulnsrc.U
 	return resp, nil
 }
 
-func parseDebianJSON(data *jsonData) (vulnerabilities []database.VulnerabilityWithAffected, unknownReleases map[string]struct{}) {
-	mvulnerabilities := make(map[string]*database.VulnerabilityWithAffected)
+func parseDebianJSON(data *jsonData) (vulnerabilities []database.Vulnerability, unknownReleases map[string]struct{}) {
+	mvulnerabilities := make(map[string]*database.Vulnerability)
 	unknownReleases = make(map[string]struct{})
 
 	for pkgName, pkgNode := range *data {
@@ -155,7 +151,6 @@ func parseDebianJSON(data *jsonData) (vulnerabilities []database.VulnerabilityWi
 				}
 
 				// Skip if the status is not determined or the vulnerability is a temporary one.
-				// TODO: maybe add "undetermined" as Unknown severity.
 				if !strings.HasPrefix(vulnName, "CVE-") || releaseNode.Status == "undetermined" {
 					continue
 				}
@@ -163,13 +158,11 @@ func parseDebianJSON(data *jsonData) (vulnerabilities []database.VulnerabilityWi
 				// Get or create the vulnerability.
 				vulnerability, vulnerabilityAlreadyExists := mvulnerabilities[vulnName]
 				if !vulnerabilityAlreadyExists {
-					vulnerability = &database.VulnerabilityWithAffected{
-						Vulnerability: database.Vulnerability{
-							Name:        vulnName,
-							Link:        strings.Join([]string{cveURLPrefix, "/", vulnName}, ""),
-							Severity:    database.UnknownSeverity,
-							Description: vulnNode.Description,
-						},
+					vulnerability = &database.Vulnerability{
+						Name:        vulnName,
+						Link:        strings.Join([]string{cveURLPrefix, "/", vulnName}, ""),
+						Severity:    database.UnknownSeverity,
+						Description: vulnNode.Description,
 					}
 				}
 
@@ -184,7 +177,10 @@ func parseDebianJSON(data *jsonData) (vulnerabilities []database.VulnerabilityWi
 				// Determine the version of the package the vulnerability affects.
 				var version string
 				var err error
-				if releaseNode.Status == "open" {
+				if releaseNode.FixedVersion == "0" {
+					// This means that the package is not affected by this vulnerability.
+					version = versionfmt.MinVersion
+				} else if releaseNode.Status == "open" {
 					// Open means that the package is currently vulnerable in the latest
 					// version of this Debian release.
 					version = versionfmt.MaxVersion
@@ -196,35 +192,21 @@ func parseDebianJSON(data *jsonData) (vulnerabilities []database.VulnerabilityWi
 						log.WithError(err).WithField("version", version).Warning("could not parse package version. skipping")
 						continue
 					}
-
-					// FixedVersion = "0" means that the vulnerability affecting
-					// current feature is not that important
-					if releaseNode.FixedVersion != "0" {
-						version = releaseNode.FixedVersion
-					}
-				}
-
-				if version == "" {
-					continue
-				}
-
-				var fixedInVersion string
-				if version != versionfmt.MaxVersion {
-					fixedInVersion = version
+					version = releaseNode.FixedVersion
 				}
 
 				// Create and add the feature version.
-				pkg := database.AffectedFeature{
-					FeatureType:     affectedType,
-					FeatureName:     pkgName,
-					AffectedVersion: version,
-					FixedInVersion:  fixedInVersion,
-					Namespace: database.Namespace{
-						Name:          "debian:" + database.DebianReleasesMapping[releaseName],
-						VersionFormat: dpkg.ParserName,
+				pkg := database.FeatureVersion{
+					Feature: database.Feature{
+						Name: pkgName,
+						Namespace: database.Namespace{
+							Name:          "debian:" + database.DebianReleasesMapping[releaseName],
+							VersionFormat: dpkg.ParserName,
+						},
 					},
+					Version: version,
 				}
-				vulnerability.Affected = append(vulnerability.Affected, pkg)
+				vulnerability.FixedIn = append(vulnerability.FixedIn, pkg)
 
 				// Store the vulnerability.
 				mvulnerabilities[vulnName] = vulnerability
@@ -247,16 +229,30 @@ func SeverityFromUrgency(urgency string) database.Severity {
 	case "not yet assigned":
 		return database.UnknownSeverity
 
-	case "end-of-life", "unimportant":
+	case "end-of-life":
+		fallthrough
+	case "unimportant":
 		return database.NegligibleSeverity
 
-	case "low", "low*", "low**":
+	case "low":
+		fallthrough
+	case "low*":
+		fallthrough
+	case "low**":
 		return database.LowSeverity
 
-	case "medium", "medium*", "medium**":
+	case "medium":
+		fallthrough
+	case "medium*":
+		fallthrough
+	case "medium**":
 		return database.MediumSeverity
 
-	case "high", "high*", "high**":
+	case "high":
+		fallthrough
+	case "high*":
+		fallthrough
+	case "high**":
 		return database.HighSeverity
 
 	default:

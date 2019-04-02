@@ -41,7 +41,6 @@ const (
 	ovalURI          = "https://linux.oracle.com/oval/"
 	elsaFilePrefix   = "com.oracle.elsa-"
 	updaterFlag      = "oracleUpdater"
-	affectedType     = database.BinaryPackage
 )
 
 var (
@@ -63,19 +62,11 @@ type definition struct {
 	References  []reference `xml:"metadata>reference"`
 	Criteria    criteria    `xml:"criteria"`
 	Severity    string      `xml:"metadata>advisory>severity"`
-	CVEs        []cve       `xml:"metadata>advisory>cve"`
 }
 
 type reference struct {
 	Source string `xml:"source,attr"`
 	URI    string `xml:"ref_url,attr"`
-	ID     string `xml:"ref_id,attr"`
-}
-
-type cve struct {
-	Impact string `xml:"impact,attr"`
-	Href   string `xml:"href,attr"`
-	ID     string `xml:",chardata"`
 }
 
 type criteria struct {
@@ -127,13 +118,9 @@ func compareELSA(left, right int) int {
 func (u *updater) Update(datastore database.Datastore) (resp vulnsrc.UpdateResponse, err error) {
 	log.WithField("package", "Oracle Linux").Info("Start fetching vulnerabilities")
 	// Get the first ELSA we have to manage.
-	flagValue, ok, err := database.FindKeyValueAndRollback(datastore, updaterFlag)
+	flagValue, err := datastore.GetKeyValue(updaterFlag)
 	if err != nil {
-		return
-	}
-
-	if !ok {
-		flagValue = ""
+		return resp, err
 	}
 
 	firstELSA, err := strconv.Atoi(flagValue)
@@ -216,7 +203,7 @@ func largest(list []int) (largest int) {
 
 func (u *updater) Clean() {}
 
-func parseELSA(ovalReader io.Reader) (vulnerabilities []database.VulnerabilityWithAffected, err error) {
+func parseELSA(ovalReader io.Reader) (vulnerabilities []database.Vulnerability, err error) {
 	// Decode the XML.
 	var ov oval
 	err = xml.NewDecoder(ovalReader).Decode(&ov)
@@ -229,37 +216,18 @@ func parseELSA(ovalReader io.Reader) (vulnerabilities []database.VulnerabilityWi
 	// Iterate over the definitions and collect any vulnerabilities that affect
 	// at least one package.
 	for _, definition := range ov.Definitions {
-		pkgs := toFeatures(definition.Criteria)
+		pkgs := toFeatureVersions(definition.Criteria)
 		if len(pkgs) > 0 {
-			vulnerability := database.VulnerabilityWithAffected{
-				Vulnerability: database.Vulnerability{
-					Name:        name(definition),
-					Link:        link(definition),
-					Severity:    severity(definition.Severity),
-					Description: description(definition),
-				},
+			vulnerability := database.Vulnerability{
+				Name:        name(definition),
+				Link:        link(definition),
+				Severity:    severity(definition),
+				Description: description(definition),
 			}
 			for _, p := range pkgs {
-				vulnerability.Affected = append(vulnerability.Affected, p)
+				vulnerability.FixedIn = append(vulnerability.FixedIn, p)
 			}
-
-			// Only ELSA is present
-			if len(definition.CVEs) == 0 {
-				vulnerabilities = append(vulnerabilities, vulnerability)
-				continue
-			}
-
-			// Create one vulnerability per CVE
-			for _, currentCVE := range definition.CVEs {
-				vulnerability.Name = currentCVE.ID
-				vulnerability.Link = currentCVE.Href
-				if currentCVE.Impact != "" {
-					vulnerability.Severity = severity(currentCVE.Impact)
-				} else {
-					vulnerability.Severity = severity(definition.Severity)
-				}
-				vulnerabilities = append(vulnerabilities, vulnerability)
-			}
+			vulnerabilities = append(vulnerabilities, vulnerability)
 		}
 	}
 
@@ -341,15 +309,15 @@ func getPossibilities(node criteria) [][]criterion {
 	return possibilities
 }
 
-func toFeatures(criteria criteria) []database.AffectedFeature {
+func toFeatureVersions(criteria criteria) []database.FeatureVersion {
 	// There are duplicates in Oracle .xml files.
 	// This map is for deduplication.
-	featureVersionParameters := make(map[string]database.AffectedFeature)
+	featureVersionParameters := make(map[string]database.FeatureVersion)
 
 	possibilities := getPossibilities(criteria)
 	for _, criterions := range possibilities {
 		var (
-			featureVersion database.AffectedFeature
+			featureVersion database.FeatureVersion
 			osVersion      int
 			err            error
 		)
@@ -364,33 +332,29 @@ func toFeatures(criteria criteria) []database.AffectedFeature {
 				}
 			} else if strings.Contains(c.Comment, " is earlier than ") {
 				const prefixLen = len(" is earlier than ")
-				featureVersion.FeatureName = strings.TrimSpace(c.Comment[:strings.Index(c.Comment, " is earlier than ")])
-				featureVersion.FeatureType = affectedType
+				featureVersion.Feature.Name = strings.TrimSpace(c.Comment[:strings.Index(c.Comment, " is earlier than ")])
 				version := c.Comment[strings.Index(c.Comment, " is earlier than ")+prefixLen:]
 				err := versionfmt.Valid(rpm.ParserName, version)
 				if err != nil {
 					log.WithError(err).WithField("version", version).Warning("could not parse package version. skipping")
 				} else {
-					featureVersion.AffectedVersion = version
-					if version != versionfmt.MaxVersion {
-						featureVersion.FixedInVersion = version
-					}
+					featureVersion.Version = version
 				}
 			}
 		}
 
-		featureVersion.Namespace.Name = "oracle" + ":" + strconv.Itoa(osVersion)
-		featureVersion.Namespace.VersionFormat = rpm.ParserName
+		featureVersion.Feature.Namespace.Name = "oracle" + ":" + strconv.Itoa(osVersion)
+		featureVersion.Feature.Namespace.VersionFormat = rpm.ParserName
 
-		if featureVersion.Namespace.Name != "" && featureVersion.FeatureName != "" && featureVersion.AffectedVersion != "" && featureVersion.FixedInVersion != "" {
-			featureVersionParameters[featureVersion.Namespace.Name+":"+featureVersion.FeatureName] = featureVersion
+		if featureVersion.Feature.Namespace.Name != "" && featureVersion.Feature.Name != "" && featureVersion.Version != "" {
+			featureVersionParameters[featureVersion.Feature.Namespace.Name+":"+featureVersion.Feature.Name] = featureVersion
 		} else {
 			log.WithField("criterions", fmt.Sprintf("%v", criterions)).Warning("could not determine a valid package from criterions")
 		}
 	}
 
 	// Convert the map to slice.
-	var featureVersionParametersArray []database.AffectedFeature
+	var featureVersionParametersArray []database.FeatureVersion
 	for _, fv := range featureVersionParameters {
 		featureVersionParametersArray = append(featureVersionParametersArray, fv)
 	}
@@ -421,20 +385,20 @@ func link(def definition) (link string) {
 	return
 }
 
-func severity(sev string) database.Severity {
-	switch strings.ToLower(sev) {
+func severity(def definition) database.Severity {
+	switch strings.ToLower(def.Severity) {
 	case "n/a":
 		return database.NegligibleSeverity
 	case "low":
 		return database.LowSeverity
 	case "moderate":
 		return database.MediumSeverity
-	case "important", "high": // some ELSAs have "high" instead of "important"
+	case "important":
 		return database.HighSeverity
 	case "critical":
 		return database.CriticalSeverity
 	default:
-		log.WithField("severity", sev).Warning("could not determine vulnerability severity")
+		log.WithField("severity", def.Severity).Warning("could not determine vulnerability severity")
 		return database.UnknownSeverity
 	}
 }

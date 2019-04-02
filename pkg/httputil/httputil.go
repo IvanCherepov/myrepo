@@ -16,19 +16,12 @@
 package httputil
 
 import (
-	"context"
-	"crypto/tls"
-	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
 
 	"github.com/coreos/clair/pkg/version"
 )
-
-// Middleware is a function used to wrap the logic of another http.Handler.
-type Middleware func(http.Handler) http.Handler
 
 // GetWithUserAgent performs an HTTP GET with the proper Clair User-Agent.
 func GetWithUserAgent(url string) (*http.Response, error) {
@@ -64,38 +57,6 @@ func GetClientAddr(r *http.Request) string {
 		}
 	}
 	return addr
-}
-
-// GetWithContext do HTTP GET to the URI with headers and returns response blob
-// reader.
-func GetWithContext(ctx context.Context, uri string, headers http.Header) (io.ReadCloser, error) {
-	request, err := http.NewRequest("GET", uri, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	if headers != nil {
-		request.Header = headers
-	}
-
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{},
-		Proxy:           http.ProxyFromEnvironment,
-	}
-
-	client := &http.Client{Transport: tr}
-	request = request.WithContext(ctx)
-	r, err := client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-
-	// Fail if we don't receive a 2xx HTTP status code.
-	if !Status2xx(r) {
-		return nil, fmt.Errorf("failed HTTP GET: expected 2XX, got %d", r.StatusCode)
-	}
-
-	return r.Body, nil
 }
 
 // Status2xx returns true if the response's status code is success (2xx)

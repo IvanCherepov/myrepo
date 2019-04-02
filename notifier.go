@@ -1,4 +1,4 @@
-// Copyright 2019 clair authors
+// Copyright 2017 clair authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 
 	"github.com/coreos/clair/database"
 	"github.com/coreos/clair/ext/notification"
+	"github.com/coreos/clair/pkg/commonerr"
 	"github.com/coreos/clair/pkg/stopper"
 )
 
@@ -93,16 +94,14 @@ func RunNotifier(config *notification.Config, datastore database.Datastore, stop
 		go func() {
 			success, interrupted := handleTask(*notification, stopper, config.Attempts)
 			if success {
-				_, err := database.MarkNotificationAsReadAndCommit(datastore, notification.Name)
-				if err != nil {
-					log.WithError(err).Error("Failed to mark notification notified")
-				}
+				datastore.SetNotificationNotified(notification.Name)
+
 				promNotifierLatencyMilliseconds.Observe(float64(time.Since(notification.Created).Nanoseconds()) / float64(time.Millisecond))
 			}
 			if interrupted {
 				running = false
 			}
-			database.ReleaseLock(datastore, notification.Name, whoAmI)
+			datastore.Unlock(notification.Name, whoAmI)
 			done <- true
 		}()
 
@@ -113,10 +112,7 @@ func RunNotifier(config *notification.Config, datastore database.Datastore, stop
 			case <-done:
 				break outer
 			case <-time.After(notifierLockRefreshDuration):
-				database.ExtendLock(datastore, notification.Name, whoAmI, notifierLockDuration)
-			case <-stopper.Chan():
-				running = false
-				break
+				datastore.Lock(notification.Name, whoAmI, notifierLockDuration, true)
 			}
 		}
 	}
@@ -124,11 +120,13 @@ func RunNotifier(config *notification.Config, datastore database.Datastore, stop
 	log.Info("notifier service stopped")
 }
 
-func findTask(datastore database.Datastore, renotifyInterval time.Duration, whoAmI string, stopper *stopper.Stopper) *database.NotificationHook {
+func findTask(datastore database.Datastore, renotifyInterval time.Duration, whoAmI string, stopper *stopper.Stopper) *database.VulnerabilityNotification {
 	for {
-		notification, ok, err := database.FindNewNotification(datastore, time.Now().Add(-renotifyInterval))
-		if err != nil || !ok {
-			if !ok {
+		// Find a notification to send.
+		notification, err := datastore.GetAvailableNotification(renotifyInterval)
+		if err != nil {
+			// There is no notification or an error occurred.
+			if err != commonerr.ErrNotFound {
 				log.WithError(err).Warning("could not get notification to send")
 			}
 
@@ -141,14 +139,14 @@ func findTask(datastore database.Datastore, renotifyInterval time.Duration, whoA
 		}
 
 		// Lock the notification.
-		if hasLock, _ := database.AcquireLock(datastore, notification.Name, whoAmI, notifierLockDuration); hasLock {
+		if hasLock, _ := datastore.Lock(notification.Name, whoAmI, notifierLockDuration, false); hasLock {
 			log.WithField(logNotiName, notification.Name).Info("found and locked a notification")
 			return &notification
 		}
 	}
 }
 
-func handleTask(n database.NotificationHook, st *stopper.Stopper, maxAttempts int) (bool, bool) {
+func handleTask(n database.VulnerabilityNotification, st *stopper.Stopper, maxAttempts int) (bool, bool) {
 	// Send notification.
 	for senderName, sender := range notification.Senders() {
 		var attempts int
@@ -169,7 +167,7 @@ func handleTask(n database.NotificationHook, st *stopper.Stopper, maxAttempts in
 			}
 
 			// Send using the current notifier.
-			if err := sender.Send(n.Name); err != nil {
+			if err := sender.Send(n); err != nil {
 				// Send failed; increase attempts/backoff and retry.
 				promNotifierBackendErrorsTotal.WithLabelValues(senderName).Inc()
 				log.WithError(err).WithFields(log.Fields{logSenderName: senderName, logNotiName: n.Name}).Error("could not send notification via notifier")

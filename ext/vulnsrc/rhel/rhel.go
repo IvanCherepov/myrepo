@@ -43,7 +43,6 @@ const (
 	ovalURI        = "https://www.redhat.com/security/data/oval/"
 	rhsaFilePrefix = "com.redhat.rhsa-"
 	updaterFlag    = "rhelUpdater"
-	affectedType   = database.BinaryPackage
 )
 
 var (
@@ -66,20 +65,11 @@ type definition struct {
 	Description string      `xml:"metadata>description"`
 	References  []reference `xml:"metadata>reference"`
 	Criteria    criteria    `xml:"criteria"`
-	Severity    string      `xml:"metadata>advisory>severity"`
-	Cves        []cve       `xml:"metadata>advisory>cve"`
 }
 
 type reference struct {
 	Source string `xml:"source,attr"`
 	URI    string `xml:"ref_url,attr"`
-	ID     string `xml:"ref_id,attr"`
-}
-
-type cve struct {
-	Impact string `xml:"impact,attr"`
-	Href   string `xml:"href,attr"`
-	ID     string `xml:",chardata"`
 }
 
 type criteria struct {
@@ -100,17 +90,11 @@ func init() {
 
 func (u *updater) Update(datastore database.Datastore) (resp vulnsrc.UpdateResponse, err error) {
 	log.WithField("package", "RHEL").Info("Start fetching vulnerabilities")
-
 	// Get the first RHSA we have to manage.
-	flagValue, ok, err := database.FindKeyValueAndRollback(datastore, updaterFlag)
+	flagValue, err := datastore.GetKeyValue(updaterFlag)
 	if err != nil {
 		return resp, err
 	}
-
-	if !ok {
-		flagValue = ""
-	}
-
 	firstRHSA, err := strconv.Atoi(flagValue)
 	if firstRHSA == 0 || err != nil {
 		firstRHSA = firstRHEL5RHSA
@@ -182,7 +166,7 @@ func (u *updater) Update(datastore database.Datastore) (resp vulnsrc.UpdateRespo
 
 func (u *updater) Clean() {}
 
-func parseRHSA(ovalReader io.Reader) (vulnerabilities []database.VulnerabilityWithAffected, err error) {
+func parseRHSA(ovalReader io.Reader) (vulnerabilities []database.Vulnerability, err error) {
 	// Decode the XML.
 	var ov oval
 	err = xml.NewDecoder(ovalReader).Decode(&ov)
@@ -195,39 +179,18 @@ func parseRHSA(ovalReader io.Reader) (vulnerabilities []database.VulnerabilityWi
 	// Iterate over the definitions and collect any vulnerabilities that affect
 	// at least one package.
 	for _, definition := range ov.Definitions {
-		pkgs := toFeatures(definition.Criteria)
+		pkgs := toFeatureVersions(definition.Criteria)
 		if len(pkgs) > 0 {
-
-			// Init vulnerability
-			vulnerability := database.VulnerabilityWithAffected{
-				Vulnerability: database.Vulnerability{
-					Name:        rhsaName(definition),
-					Link:        rhsaLink(definition),
-					Severity:    severity(definition.Severity),
-					Description: description(definition),
-				},
+			vulnerability := database.Vulnerability{
+				Name:        name(definition),
+				Link:        link(definition),
+				Severity:    severity(definition),
+				Description: description(definition),
 			}
 			for _, p := range pkgs {
-				vulnerability.Affected = append(vulnerability.Affected, p)
+				vulnerability.FixedIn = append(vulnerability.FixedIn, p)
 			}
-
-			// Only RHSA is present
-			if len(definition.References) == 1 {
-				vulnerabilities = append(vulnerabilities, vulnerability)
-				continue
-			}
-
-			// Create one vulnerability by CVE
-			for _, currentCve := range definition.Cves {
-				vulnerability.Name = currentCve.ID
-				vulnerability.Link = currentCve.Href
-				if currentCve.Impact != "" && currentCve.Impact != "none" {
-					vulnerability.Severity = severity(currentCve.Impact)
-				} else {
-					vulnerability.Severity = severity(definition.Severity)
-				}
-				vulnerabilities = append(vulnerabilities, vulnerability)
-			}
+			vulnerabilities = append(vulnerabilities, vulnerability)
 		}
 	}
 
@@ -309,15 +272,15 @@ func getPossibilities(node criteria) [][]criterion {
 	return possibilities
 }
 
-func toFeatures(criteria criteria) []database.AffectedFeature {
+func toFeatureVersions(criteria criteria) []database.FeatureVersion {
 	// There are duplicates in Red Hat .xml files.
 	// This map is for deduplication.
-	featureVersionParameters := make(map[string]database.AffectedFeature)
+	featureVersionParameters := make(map[string]database.FeatureVersion)
 
 	possibilities := getPossibilities(criteria)
 	for _, criterions := range possibilities {
 		var (
-			featureVersion database.AffectedFeature
+			featureVersion database.FeatureVersion
 			osVersion      int
 			err            error
 		)
@@ -332,38 +295,34 @@ func toFeatures(criteria criteria) []database.AffectedFeature {
 				}
 			} else if strings.Contains(c.Comment, " is earlier than ") {
 				const prefixLen = len(" is earlier than ")
-				featureVersion.FeatureName = strings.TrimSpace(c.Comment[:strings.Index(c.Comment, " is earlier than ")])
-				featureVersion.FeatureType = affectedType
+				featureVersion.Feature.Name = strings.TrimSpace(c.Comment[:strings.Index(c.Comment, " is earlier than ")])
 				version := c.Comment[strings.Index(c.Comment, " is earlier than ")+prefixLen:]
 				err := versionfmt.Valid(rpm.ParserName, version)
 				if err != nil {
 					log.WithError(err).WithField("version", version).Warning("could not parse package version. skipping")
 				} else {
-					featureVersion.AffectedVersion = version
-					if version != versionfmt.MaxVersion {
-						featureVersion.FixedInVersion = version
-					}
-					featureVersion.Namespace.VersionFormat = rpm.ParserName
+					featureVersion.Version = version
+					featureVersion.Feature.Namespace.VersionFormat = rpm.ParserName
 				}
 			}
 		}
 
 		if osVersion >= firstConsideredRHEL {
 			// TODO(vbatts) this is where features need multiple labels ('centos' and 'rhel')
-			featureVersion.Namespace.Name = "centos" + ":" + strconv.Itoa(osVersion)
+			featureVersion.Feature.Namespace.Name = "centos" + ":" + strconv.Itoa(osVersion)
 		} else {
 			continue
 		}
 
-		if featureVersion.Namespace.Name != "" && featureVersion.FeatureName != "" && featureVersion.AffectedVersion != "" && featureVersion.FixedInVersion != "" {
-			featureVersionParameters[featureVersion.Namespace.Name+":"+featureVersion.FeatureName] = featureVersion
+		if featureVersion.Feature.Namespace.Name != "" && featureVersion.Feature.Name != "" && featureVersion.Version != "" {
+			featureVersionParameters[featureVersion.Feature.Namespace.Name+":"+featureVersion.Feature.Name] = featureVersion
 		} else {
 			log.WithField("criterions", fmt.Sprintf("%v", criterions)).Warning("could not determine a valid package from criterions")
 		}
 	}
 
 	// Convert the map to slice.
-	var featureVersionParametersArray []database.AffectedFeature
+	var featureVersionParametersArray []database.FeatureVersion
 	for _, fv := range featureVersionParameters {
 		featureVersionParametersArray = append(featureVersionParametersArray, fv)
 	}
@@ -379,8 +338,23 @@ func description(def definition) (desc string) {
 	return
 }
 
-func severity(sev string) database.Severity {
-	switch strings.Title(sev) {
+func name(def definition) string {
+	return strings.TrimSpace(def.Title[:strings.Index(def.Title, ": ")])
+}
+
+func link(def definition) (link string) {
+	for _, reference := range def.References {
+		if reference.Source == "RHSA" {
+			link = reference.URI
+			break
+		}
+	}
+
+	return
+}
+
+func severity(def definition) database.Severity {
+	switch strings.TrimSpace(def.Title[strings.LastIndex(def.Title, "(")+1 : len(def.Title)-1]) {
 	case "Low":
 		return database.LowSeverity
 	case "Moderate":
@@ -390,18 +364,7 @@ func severity(sev string) database.Severity {
 	case "Critical":
 		return database.CriticalSeverity
 	default:
-		log.Warningf("could not determine vulnerability severity from: %s.", sev)
+		log.Warningf("could not determine vulnerability severity from: %s.", def.Title)
 		return database.UnknownSeverity
 	}
-}
-
-func rhsaName(def definition) string {
-	return strings.TrimSpace(def.Title[:strings.Index(def.Title, ": ")])
-}
-
-func rhsaLink(def definition) (link string) {
-	if len(def.References) > 0 {
-		link = def.References[0].URI
-	}
-	return
 }

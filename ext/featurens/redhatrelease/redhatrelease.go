@@ -33,18 +33,16 @@ var (
 	oracleReleaseRegexp = regexp.MustCompile(`(?P<os>Oracle) (Linux Server release) (?P<version>[\d]+)`)
 	centosReleaseRegexp = regexp.MustCompile(`(?P<os>[^\s]*) (Linux release|release) (?P<version>[\d]+)`)
 	redhatReleaseRegexp = regexp.MustCompile(`(?P<os>Red Hat Enterprise Linux) (Client release|Server release|Workstation release) (?P<version>[\d]+)`)
-
-	filenames = []string{"etc/oracle-release", "etc/centos-release", "etc/redhat-release", "etc/system-release"}
 )
 
 type detector struct{}
 
 func init() {
-	featurens.RegisterDetector("redhat-release", "1.0", &detector{})
+	featurens.RegisterDetector("redhat-release", &detector{})
 }
 
 func (d detector) Detect(files tarutil.FilesMap) (*database.Namespace, error) {
-	for _, filePath := range filenames {
+	for _, filePath := range d.RequiredFilenames() {
 		f, hasFile := files[filePath]
 		if !hasFile {
 			continue
@@ -85,5 +83,5 @@ func (d detector) Detect(files tarutil.FilesMap) (*database.Namespace, error) {
 }
 
 func (d detector) RequiredFilenames() []string {
-	return []string{`^etc/(oracle|centos|redhat|system)-release`}
+	return []string{"etc/oracle-release", "etc/centos-release", "etc/redhat-release", "etc/system-release"}
 }

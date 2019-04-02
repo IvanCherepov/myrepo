@@ -19,29 +19,62 @@ import (
 
 	"github.com/coreos/clair/database"
 	"github.com/coreos/clair/ext/featurefmt"
-	"github.com/coreos/clair/ext/versionfmt/dpkg"
+	"github.com/coreos/clair/pkg/tarutil"
 )
 
 func TestAPKFeatureDetection(t *testing.T) {
-	for _, test := range []featurefmt.TestCase{
+	testData := []featurefmt.TestData{
 		{
-			"valid case",
-			map[string]string{"lib/apk/db/installed": "apk/testdata/valid"},
-			[]database.LayerFeature{
-				{Feature: database.Feature{"apk-tools", "2.6.7-r0", "dpkg", "binary"}},
-				{Feature: database.Feature{"musl", "1.1.14-r10", "dpkg", "binary"}},
-				{Feature: database.Feature{"libssl1.0", "1.0.2h-r1", "dpkg", "binary"}},
-				{Feature: database.Feature{"libc-utils", "0.7-r0", "dpkg", "binary"}},
-				{Feature: database.Feature{"busybox", "1.24.2-r9", "dpkg", "binary"}},
-				{Feature: database.Feature{"scanelf", "1.1.6-r0", "dpkg", "binary"}},
-				{Feature: database.Feature{"alpine-keys", "1.1-r0", "dpkg", "binary"}},
-				{Feature: database.Feature{"libcrypto1.0", "1.0.2h-r1", "dpkg", "binary"}},
-				{Feature: database.Feature{"zlib", "1.2.8-r2", "dpkg", "binary"}},
-				{Feature: database.Feature{"musl-utils", "1.1.14-r10", "dpkg", "binary"}},
-				{Feature: database.Feature{"alpine-baselayout", "3.0.3-r0", "dpkg", "binary"}},
+			FeatureVersions: []database.FeatureVersion{
+				{
+					Feature: database.Feature{Name: "musl"},
+					Version: "1.1.14-r10",
+				},
+				{
+					Feature: database.Feature{Name: "busybox"},
+					Version: "1.24.2-r9",
+				},
+				{
+					Feature: database.Feature{Name: "alpine-baselayout"},
+					Version: "3.0.3-r0",
+				},
+				{
+					Feature: database.Feature{Name: "alpine-keys"},
+					Version: "1.1-r0",
+				},
+				{
+					Feature: database.Feature{Name: "zlib"},
+					Version: "1.2.8-r2",
+				},
+				{
+					Feature: database.Feature{Name: "libcrypto1.0"},
+					Version: "1.0.2h-r1",
+				},
+				{
+					Feature: database.Feature{Name: "libssl1.0"},
+					Version: "1.0.2h-r1",
+				},
+				{
+					Feature: database.Feature{Name: "apk-tools"},
+					Version: "2.6.7-r0",
+				},
+				{
+					Feature: database.Feature{Name: "scanelf"},
+					Version: "1.1.6-r0",
+				},
+				{
+					Feature: database.Feature{Name: "musl-utils"},
+					Version: "1.1.14-r10",
+				},
+				{
+					Feature: database.Feature{Name: "libc-utils"},
+					Version: "0.7-r0",
+				},
+			},
+			Files: tarutil.FilesMap{
+				"lib/apk/db/installed": featurefmt.LoadFileForTest("apk/testdata/installed"),
 			},
 		},
-	} {
-		featurefmt.RunTest(t, test, lister{}, dpkg.ParserName)
 	}
+	featurefmt.TestLister(t, &lister{}, testData)
 }

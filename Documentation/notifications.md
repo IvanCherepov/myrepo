@@ -1,14 +1,13 @@
 # Notifications
 
-Notifications are a way for Clair to inform another service that changes to tracked vulnerabilities have occurred.
-Because changes to vulnerabilities also contain the set of affected images, Clair sends only the name of the notification to another service, then depends on that service read and mark the notification as read using Clair's API.
+Notifications are a way for Clair to inform an endpoint that changes to tracked vulnerabilities have occurred.
 Because notification data can require pagination, Clair should only send the name of a notification.
-If a notification is not marked as read, Clair will resend notifications at a configured interval.
+It is expected that the receiving endpoint calls the Clair API for reading notifications and marking them as read after being notified.
+If the notification is never marked as read, Clair will continue attempting to send the same notification to the endpoint indefinitely.
 
-# Webhook
+## Webhook
 
-Notifications are an extensible component of Clair, but out of the box Clair supports [webhooks].
-The webhooks look like the following:
+Webhook is an out-of-the-box notifier that sends the following JSON object via an HTTP POST:
 
 ```json
 {
@@ -18,7 +17,11 @@ The webhooks look like the following:
 }
 ```
 
-If you're interested in adding your own notification senders, read the documentation on [adding new drivers].
+## Custom Notifiers
 
-[webhooks]: https://en.wikipedia.org/wiki/Webhook
-[adding new drivers]: /Documentation/drivers-and-data-sources.md#adding-new-drivers
+Clair can also be compiled with custom notifiers by importing them in `main.go`.
+Custom notifiers are any Go package that implements the `Notifier` interface and registers themselves with the `notifier` package.
+Notifiers are registered in [init()] similar to drivers for Go's standard [database/sql] package.
+
+[init()]: https://golang.org/doc/effective_go.html#init
+[database/sql]: https://godoc.org/database/sql

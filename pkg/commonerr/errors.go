@@ -16,11 +16,7 @@
 // codebase.
 package commonerr
 
-import (
-	"errors"
-	"fmt"
-	"strings"
-)
+import "errors"
 
 var (
 	// ErrFilesystem occurs when a filesystem interaction fails.
@@ -48,20 +44,4 @@ func NewBadRequestError(message string) error {
 
 func (e *ErrBadRequest) Error() string {
 	return e.s
-}
-
-// CombineErrors merges a slice of errors into one separated by ";". If all
-// errors are nil, return nil.
-func CombineErrors(errs ...error) error {
-	errStr := []string{}
-	for i, err := range errs {
-		if err != nil {
-			errStr = append(errStr, fmt.Sprintf("[%d] %s", i, err.Error()))
-		}
-	}
-
-	if len(errStr) != 0 {
-		return errors.New(strings.Join(errStr, ";"))
-	}
-	return nil
 }

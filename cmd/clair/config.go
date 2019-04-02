@@ -1,4 +1,4 @@
-// Copyright 2018 clair authors
+// Copyright 2017 clair authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,15 +20,13 @@ import (
 	"os"
 	"time"
 
-	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
 
 	"github.com/coreos/clair"
 	"github.com/coreos/clair/api"
 	"github.com/coreos/clair/database"
 	"github.com/coreos/clair/ext/notification"
-	"github.com/coreos/clair/ext/vulnsrc"
-	"github.com/coreos/clair/pkg/pagination"
+	"github.com/fernet/fernet-go"
 )
 
 // ErrDatasourceNotLoaded is returned when the datasource variable in the
@@ -56,12 +54,11 @@ func DefaultConfig() Config {
 			Type: "pgsql",
 		},
 		Updater: &clair.UpdaterConfig{
-			EnabledUpdaters: vulnsrc.ListUpdaters(),
-			Interval:        1 * time.Hour,
+			Interval: 1 * time.Hour,
 		},
 		API: &api.Config{
-			HealthAddr: "0.0.0.0:6061",
-			Addr:       "0.0.0.0:6060",
+			Port:       6060,
+			HealthPort: 6061,
 			Timeout:    900 * time.Second,
 		},
 		Notifier: &notification.Config{
@@ -99,12 +96,16 @@ func LoadConfig(path string) (config *Config, err error) {
 	config = &cfgFile.Clair
 
 	// Generate a pagination key if none is provided.
-	if v, ok := config.Database.Options["paginationkey"]; !ok || v == nil || v.(string) == "" {
-		log.Warn("pagination key is empty, generating...")
-		config.Database.Options["paginationkey"] = pagination.Must(pagination.NewKey()).String()
+	if config.API.PaginationKey == "" {
+		var key fernet.Key
+		if err = key.Generate(); err != nil {
+			return
+		}
+		config.API.PaginationKey = key.Encode()
 	} else {
-		_, err = pagination.KeyFromString(config.Database.Options["paginationkey"].(string))
+		_, err = fernet.DecodeKey(config.API.PaginationKey)
 		if err != nil {
+			err = errors.New("Invalid Pagination key; must be 32-bit URL-safe base64")
 			return
 		}
 	}

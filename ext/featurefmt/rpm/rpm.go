@@ -17,13 +17,11 @@ package rpm
 
 import (
 	"bufio"
-	"fmt"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	"strings"
 
-	"github.com/deckarep/golang-set"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/coreos/clair/database"
@@ -31,185 +29,88 @@ import (
 	"github.com/coreos/clair/ext/versionfmt"
 	"github.com/coreos/clair/ext/versionfmt/rpm"
 	"github.com/coreos/clair/pkg/commonerr"
-	"github.com/coreos/clair/pkg/strutil"
 	"github.com/coreos/clair/pkg/tarutil"
 )
-
-var ignoredPackages = []string{
-	"gpg-pubkey", // Ignore gpg-pubkey packages which are fake packages used to store GPG keys - they are not versionned properly.
-}
 
 type lister struct{}
 
 func init() {
-	featurefmt.RegisterLister("rpm", "1.0", &lister{})
+	featurefmt.RegisterLister("rpm", &lister{})
 }
 
-func (l lister) RequiredFilenames() []string {
-	return []string{"^var/lib/rpm/Packages"}
-}
-
-func isIgnored(packageName string) bool {
-	for _, pkg := range ignoredPackages {
-		if pkg == packageName {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (l lister) ListFeatures(files tarutil.FilesMap) ([]database.LayerFeature, error) {
+func (l lister) ListFeatures(files tarutil.FilesMap) ([]database.FeatureVersion, error) {
 	f, hasFile := files["var/lib/rpm/Packages"]
 	if !hasFile {
-		return []database.LayerFeature{}, nil
+		return []database.FeatureVersion{}, nil
 	}
+
+	// Create a map to store packages and ensure their uniqueness
+	packagesMap := make(map[string]database.FeatureVersion)
 
 	// Write the required "Packages" file to disk
 	tmpDir, err := ioutil.TempDir(os.TempDir(), "rpm")
 	defer os.RemoveAll(tmpDir)
 	if err != nil {
 		log.WithError(err).Error("could not create temporary folder for RPM detection")
-		return []database.LayerFeature{}, commonerr.ErrFilesystem
+		return []database.FeatureVersion{}, commonerr.ErrFilesystem
 	}
 
 	err = ioutil.WriteFile(tmpDir+"/Packages", f, 0700)
 	if err != nil {
 		log.WithError(err).Error("could not create temporary file for RPM detection")
-		return []database.LayerFeature{}, commonerr.ErrFilesystem
+		return []database.FeatureVersion{}, commonerr.ErrFilesystem
 	}
 
 	// Extract binary package names because RHSA refers to binary package names.
-	out, err := exec.Command("rpm", "--dbpath", tmpDir, "-qa", "--qf", "%{NAME} %{EPOCH}:%{VERSION}-%{RELEASE} %{SOURCERPM}\n").CombinedOutput()
+	out, err := exec.Command("rpm", "--dbpath", tmpDir, "-qa", "--qf", "%{NAME} %{EPOCH}:%{VERSION}-%{RELEASE}\n").CombinedOutput()
 	if err != nil {
-		log.WithError(err).WithField("output", string(out)).Error("failed to query RPM")
+		log.WithError(err).WithField("output", string(out)).Error("could not query RPM")
 		// Do not bubble up because we probably won't be able to fix it,
 		// the database must be corrupted
-		return []database.LayerFeature{}, nil
+		return []database.FeatureVersion{}, nil
 	}
 
-	packages := mapset.NewSet()
 	scanner := bufio.NewScanner(strings.NewReader(string(out)))
 	for scanner.Scan() {
-		rpmPackage, srpmPackage := parseRPMOutput(scanner.Text())
-		if rpmPackage != nil {
-			packages.Add(*rpmPackage)
+		line := strings.Split(scanner.Text(), " ")
+		if len(line) != 2 {
+			// We may see warnings on some RPM versions:
+			// "warning: Generating 12 missing index(es), please wait..."
+			continue
 		}
 
-		if srpmPackage != nil {
-			packages.Add(*srpmPackage)
+		// Ignore gpg-pubkey packages which are fake packages used to store GPG keys - they are not versionned properly.
+		if line[0] == "gpg-pubkey" {
+			continue
 		}
+
+		// Parse version
+		version := strings.Replace(line[1], "(none):", "", -1)
+		err := versionfmt.Valid(rpm.ParserName, version)
+		if err != nil {
+			log.WithError(err).WithField("version", line[1]).Warning("could not parse package version. skipping")
+			continue
+		}
+
+		// Add package
+		pkg := database.FeatureVersion{
+			Feature: database.Feature{
+				Name: line[0],
+			},
+			Version: version,
+		}
+		packagesMap[pkg.Feature.Name+"#"+pkg.Version] = pkg
 	}
 
-	return database.ConvertFeatureSetToLayerFeatures(packages), nil
+	// Convert the map to a slice
+	packages := make([]database.FeatureVersion, 0, len(packagesMap))
+	for _, pkg := range packagesMap {
+		packages = append(packages, pkg)
+	}
+
+	return packages, nil
 }
 
-func parseRPMOutput(raw string) (rpmPackage *database.Feature, srpmPackage *database.Feature) {
-	line := strings.Split(raw, " ")
-	if len(line) != 3 {
-		// We may see warnings on some RPM versions:
-		// "warning: Generating 12 missing index(es), please wait..."
-		return
-	}
-
-	if isIgnored(line[0]) {
-		return
-	}
-
-	name, version, srpm := line[0], strings.Replace(line[1], "(none):", "", -1), line[2]
-	if err := versionfmt.Valid(rpm.ParserName, version); err != nil {
-		log.WithError(err).WithFields(log.Fields{"name": name, "version": version}).Warning("skipped unparseable package")
-		return
-	}
-
-	rpmPackage = &database.Feature{name, version, rpm.ParserName, database.BinaryPackage}
-	srpmName, srpmVersion, srpmRelease, _, err := parseSourceRPM(srpm)
-	if err != nil {
-		log.WithError(err).WithFields(log.Fields{"name": name, "sourcerpm": srpm}).Warning("skipped unparseable package")
-		return
-	}
-
-	srpmVersion = srpmVersion + "-" + srpmRelease
-	if err = versionfmt.Valid(rpm.ParserName, srpmVersion); err != nil {
-		return
-	}
-
-	srpmPackage = &database.Feature{srpmName, srpmVersion, rpm.ParserName, database.SourcePackage}
-	return
-}
-
-type rpmParserState string
-
-const (
-	terminate         rpmParserState = "terminate"
-	parseRPM          rpmParserState = "RPM Token"
-	parseArchitecture rpmParserState = "Architecture Token"
-	parseRelease      rpmParserState = "Release Token"
-	parseVersion      rpmParserState = "Version Token"
-)
-
-// parseSourceRPM parses the source rpm package representation string
-// http://ftp.rpm.org/max-rpm/ch-rpm-file-format.html
-func parseSourceRPM(sourceRPM string) (name string, version string, release string, architecture string, err error) {
-	state := parseRPM
-	previousCheckPoint := len(sourceRPM)
-	for i := len(sourceRPM) - 1; i >= 0; i-- {
-		switch state {
-		case parseRPM:
-			if string(sourceRPM[i]) == "." {
-				state = parseArchitecture
-				packageType := strutil.Substring(sourceRPM, i+1, len(sourceRPM))
-				previousCheckPoint = i
-				if packageType != "rpm" {
-					err = fmt.Errorf("unexpected package type, expect: 'rpm', got: '%s'", packageType)
-					return
-				}
-			}
-		case parseArchitecture:
-			if string(sourceRPM[i]) == "." {
-				state = parseRelease
-				architecture = strutil.Substring(sourceRPM, i+1, previousCheckPoint)
-				previousCheckPoint = i
-				if architecture != "src" && architecture != "nosrc" {
-					err = fmt.Errorf("unexpected package architecture, expect: 'src' or 'nosrc', got: '%s'", architecture)
-					return
-				}
-			}
-		case parseRelease:
-			if string(sourceRPM[i]) == "-" {
-				state = parseVersion
-				release = strutil.Substring(sourceRPM, i+1, previousCheckPoint)
-				previousCheckPoint = i
-				if release == "" {
-					err = fmt.Errorf("unexpected package release, expect: not empty")
-					return
-				}
-			}
-		case parseVersion:
-			if string(sourceRPM[i]) == "-" {
-				// terminate state
-				state = terminate
-				version = strutil.Substring(sourceRPM, i+1, previousCheckPoint)
-				previousCheckPoint = i
-				if version == "" {
-					err = fmt.Errorf("unexpected package version, expect: not empty")
-					return
-				}
-				break
-			}
-		}
-	}
-
-	if state != terminate {
-		err = fmt.Errorf("unexpected termination while parsing '%s'", state)
-		return
-	}
-
-	name = strutil.Substring(sourceRPM, 0, previousCheckPoint)
-	if name == "" {
-		err = fmt.Errorf("unexpected package name, expect: not empty")
-		return
-	}
-
-	return
+func (l lister) RequiredFilenames() []string {
+	return []string{"var/lib/rpm/Packages"}
 }

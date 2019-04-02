@@ -1,4 +1,4 @@
-// Copyright 2018 clair authors
+// Copyright 2017 clair authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,8 +18,11 @@ package alpine
 
 import (
 	"io"
+	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
@@ -28,19 +31,13 @@ import (
 	"github.com/coreos/clair/ext/versionfmt"
 	"github.com/coreos/clair/ext/versionfmt/dpkg"
 	"github.com/coreos/clair/ext/vulnsrc"
-	"github.com/coreos/clair/pkg/fsutil"
-	"github.com/coreos/clair/pkg/gitutil"
+	"github.com/coreos/clair/pkg/commonerr"
 )
 
 const (
-	// This Alpine vulnerability database affects origin packages, which has
-	// `origin` field of itself.
 	secdbGitURL  = "https://github.com/alpinelinux/alpine-secdb"
 	updaterFlag  = "alpine-secdbUpdater"
 	nvdURLPrefix = "https://cve.mitre.org/cgi-bin/cvename.cgi?name="
-	// affected type indicates if the affected feature hint is for binary or
-	// source package.
-	affectedType = database.BinaryPackage
 )
 
 func init() {
@@ -52,44 +49,50 @@ type updater struct {
 }
 
 func (u *updater) Update(db database.Datastore) (resp vulnsrc.UpdateResponse, err error) {
-	log.WithField("package", "Alpine").Info("start fetching vulnerabilities")
-	// Pull the master branch.
-	var (
-		commit         string
-		existingCommit string
-		foundCommit    bool
-		namespaces     []string
-		vulns          []database.VulnerabilityWithAffected
-	)
+	log.WithField("package", "Alpine").Info("Start fetching vulnerabilities")
 
-	if u.repositoryLocalPath, commit, err = gitutil.CloneOrPull(secdbGitURL, u.repositoryLocalPath, updaterFlag); err != nil {
+	// Pull the master branch.
+	var commit string
+	commit, err = u.pullRepository()
+	if err != nil {
+		return
+	}
+
+	// Ask the database for the latest commit we successfully applied.
+	var dbCommit string
+	dbCommit, err = db.GetKeyValue(updaterFlag)
+	if err != nil {
 		return
 	}
 
 	// Set the updaterFlag to equal the commit processed.
 	resp.FlagName = updaterFlag
 	resp.FlagValue = commit
-	if existingCommit, foundCommit, err = database.FindKeyValueAndRollback(db, updaterFlag); err != nil {
-		return
-	}
 
 	// Short-circuit if there have been no updates.
-	if foundCommit && commit == existingCommit {
-		log.WithField("package", "alpine").Debug("no update, skip")
+	if commit == dbCommit {
+		log.WithField("package", "alpine").Debug("no update")
 		return
 	}
 
 	// Get the list of namespaces from the repository.
-	if namespaces, err = fsutil.Readdir(u.repositoryLocalPath, fsutil.DirectoriesOnly); err != nil {
+	var namespaces []string
+	namespaces, err = ls(u.repositoryLocalPath, directoriesOnly)
+	if err != nil {
 		return
 	}
 
 	// Append any changed vulnerabilities to the response.
 	for _, namespace := range namespaces {
-		if vulns, err = parseVulnsFromNamespace(u.repositoryLocalPath, namespace); err != nil {
+		var vulns []database.Vulnerability
+		var note string
+		vulns, note, err = parseVulnsFromNamespace(u.repositoryLocalPath, namespace)
+		if err != nil {
 			return
 		}
-
+		if note != "" {
+			resp.Notes = append(resp.Notes, note)
+		}
 		resp.Vulnerabilities = append(resp.Vulnerabilities, vulns...)
 	}
 
@@ -102,26 +105,108 @@ func (u *updater) Clean() {
 	}
 }
 
-func parseVulnsFromNamespace(repositoryPath, namespace string) (vulns []database.VulnerabilityWithAffected, err error) {
+type lsFilter int
+
+const (
+	filesOnly lsFilter = iota
+	directoriesOnly
+)
+
+func ls(path string, filter lsFilter) ([]string, error) {
+	dir, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+
+	finfos, err := dir.Readdir(0)
+	if err != nil {
+		return nil, err
+	}
+
+	var files []string
+	for _, info := range finfos {
+		if filter == directoriesOnly && !info.IsDir() {
+			continue
+		}
+
+		if filter == filesOnly && info.IsDir() {
+			continue
+		}
+
+		if strings.HasPrefix(info.Name(), ".") {
+			continue
+		}
+
+		files = append(files, info.Name())
+	}
+
+	return files, nil
+}
+
+func parseVulnsFromNamespace(repositoryPath, namespace string) (vulns []database.Vulnerability, note string, err error) {
 	nsDir := filepath.Join(repositoryPath, namespace)
 	var dbFilenames []string
-	if dbFilenames, err = fsutil.Readdir(nsDir, fsutil.FilesOnly); err != nil {
+	dbFilenames, err = ls(nsDir, filesOnly)
+	if err != nil {
 		return
 	}
 
 	for _, filename := range dbFilenames {
-		var db *secDB
-		if db, err = newSecDB(filepath.Join(nsDir, filename)); err != nil {
+		var file io.ReadCloser
+		file, err = os.Open(filepath.Join(nsDir, filename))
+		if err != nil {
 			return
 		}
 
-		vulns = append(vulns, db.Vulnerabilities()...)
+		var fileVulns []database.Vulnerability
+		fileVulns, err = parseYAML(file)
+		if err != nil {
+			return
+		}
+
+		vulns = append(vulns, fileVulns...)
+		file.Close()
 	}
 
 	return
 }
 
-type secDB struct {
+func (u *updater) pullRepository() (commit string, err error) {
+	// If the repository doesn't exist, clone it.
+	if _, pathExists := os.Stat(u.repositoryLocalPath); u.repositoryLocalPath == "" || os.IsNotExist(pathExists) {
+		if u.repositoryLocalPath, err = ioutil.TempDir(os.TempDir(), "alpine-secdb"); err != nil {
+			return "", vulnsrc.ErrFilesystem
+		}
+
+		cmd := exec.Command("git", "clone", secdbGitURL, ".")
+		cmd.Dir = u.repositoryLocalPath
+		if out, err := cmd.CombinedOutput(); err != nil {
+			u.Clean()
+			log.WithError(err).WithField("output", string(out)).Error("could not pull alpine-secdb repository")
+			return "", commonerr.ErrCouldNotDownload
+		}
+	} else {
+		// The repository already exists and it needs to be refreshed via a pull.
+		cmd := exec.Command("git", "pull")
+		cmd.Dir = u.repositoryLocalPath
+		if _, err := cmd.CombinedOutput(); err != nil {
+			return "", vulnsrc.ErrGitFailure
+		}
+	}
+
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = u.repositoryLocalPath
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", vulnsrc.ErrGitFailure
+	}
+
+	commit = strings.TrimSpace(string(out))
+	return
+}
+
+type secDBFile struct {
 	Distro   string `yaml:"distroversion"`
 	Packages []struct {
 		Pkg struct {
@@ -131,60 +216,43 @@ type secDB struct {
 	} `yaml:"packages"`
 }
 
-func newSecDB(filePath string) (file *secDB, err error) {
-	var f io.ReadCloser
-	f, err = os.Open(filePath)
+func parseYAML(r io.Reader) (vulns []database.Vulnerability, err error) {
+	var rBytes []byte
+	rBytes, err = ioutil.ReadAll(r)
 	if err != nil {
 		return
 	}
 
-	defer f.Close()
-	file = &secDB{}
-	err = yaml.NewDecoder(f).Decode(file)
-	return
-}
-
-func (file *secDB) Vulnerabilities() (vulns []database.VulnerabilityWithAffected) {
-	if file == nil {
+	var file secDBFile
+	err = yaml.Unmarshal(rBytes, &file)
+	if err != nil {
 		return
 	}
 
-	namespace := database.Namespace{Name: "alpine:" + file.Distro, VersionFormat: dpkg.ParserName}
-	for _, pkg := range file.Packages {
-		for version, cveNames := range pkg.Pkg.Fixes {
-			if err := versionfmt.Valid(dpkg.ParserName, version); err != nil {
-				log.WithError(err).WithFields(log.Fields{
-					"version":      version,
-					"package name": pkg.Pkg.Name,
-				}).Warning("could not parse package version, skipping")
+	for _, pack := range file.Packages {
+		pkg := pack.Pkg
+		for version, vulnStrs := range pkg.Fixes {
+			err := versionfmt.Valid(dpkg.ParserName, version)
+			if err != nil {
+				log.WithError(err).WithField("version", version).Warning("could not parse package version. skipping")
 				continue
 			}
 
-			for _, cve := range cveNames {
-				vuln := database.VulnerabilityWithAffected{
-					Vulnerability: database.Vulnerability{
-						Name:      cve,
-						Link:      nvdURLPrefix + cve,
-						Severity:  database.UnknownSeverity,
-						Namespace: namespace,
-					},
-				}
-
-				var fixedInVersion string
-				if version != versionfmt.MaxVersion {
-					fixedInVersion = version
-				}
-
-				vuln.Affected = []database.AffectedFeature{
+			for _, vulnStr := range vulnStrs {
+				var vuln database.Vulnerability
+				vuln.Severity = database.UnknownSeverity
+				vuln.Name = vulnStr
+				vuln.Link = nvdURLPrefix + vulnStr
+				vuln.FixedIn = []database.FeatureVersion{
 					{
-						FeatureType:     affectedType,
-						FeatureName:     pkg.Pkg.Name,
-						AffectedVersion: version,
-						FixedInVersion:  fixedInVersion,
-						Namespace: database.Namespace{
-							Name:          "alpine:" + file.Distro,
-							VersionFormat: dpkg.ParserName,
+						Feature: database.Feature{
+							Namespace: database.Namespace{
+								Name:          "alpine:" + file.Distro,
+								VersionFormat: dpkg.ParserName,
+							},
+							Name: pkg.Name,
 						},
+						Version: version,
 					},
 				}
 				vulns = append(vulns, vuln)

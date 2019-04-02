@@ -29,7 +29,7 @@ import (
 
 var (
 	detectorsM sync.RWMutex
-	detectors  = make(map[string]detector)
+	detectors  = make(map[string]Detector)
 )
 
 // Detector represents an ability to detect a namespace used for organizing
@@ -39,27 +39,20 @@ type Detector interface {
 	// layer.
 	Detect(tarutil.FilesMap) (*database.Namespace, error)
 
-	// RequiredFilenames returns a list of patterns for filenames that will
-	// be in the FilesMap provided to the Detect method.
+	// RequiredFilenames returns the list of files required to be in the FilesMap
+	// provided to the Detect method.
 	//
-	// The patterns are expressed as regexps, and will be matched against
-	// full paths that do not include the leading "/".
+	// Filenames must not begin with "/".
 	RequiredFilenames() []string
-}
-
-type detector struct {
-	Detector
-
-	info database.Detector
 }
 
 // RegisterDetector makes a detector available by the provided name.
 //
 // If called twice with the same name, the name is blank, or if the provided
 // Detector is nil, this function panics.
-func RegisterDetector(name string, version string, d Detector) {
-	if name == "" || version == "" {
-		panic("namespace: could not register a Detector with an empty name or version")
+func RegisterDetector(name string, d Detector) {
+	if name == "" {
+		panic("namespace: could not register a Detector with an empty name")
 	}
 	if d == nil {
 		panic("namespace: could not register a nil Detector")
@@ -68,72 +61,46 @@ func RegisterDetector(name string, version string, d Detector) {
 	detectorsM.Lock()
 	defer detectorsM.Unlock()
 
-	if _, ok := detectors[name]; ok {
+	if _, dup := detectors[name]; dup {
 		panic("namespace: RegisterDetector called twice for " + name)
 	}
 
-	detectors[name] = detector{d, database.NewNamespaceDetector(name, version)}
+	detectors[name] = d
 }
 
-// Detect uses detectors specified to retrieve the detect result.
-func Detect(files tarutil.FilesMap, toUse []database.Detector) ([]database.LayerNamespace, error) {
+// Detect iterators through all registered Detectors and returns the first
+// non-nil detected namespace.
+func Detect(files tarutil.FilesMap) (*database.Namespace, error) {
 	detectorsM.RLock()
 	defer detectorsM.RUnlock()
 
-	namespaces := []database.LayerNamespace{}
-	for _, d := range toUse {
-		// Only use the detector with the same type
-		if d.DType != database.NamespaceDetectorType {
-			continue
+	for name, detector := range detectors {
+		namespace, err := detector.Detect(files)
+		if err != nil {
+			log.WithError(err).WithField("name", name).Warning("failed while attempting to detect namespace")
+			return nil, err
 		}
 
-		if detector, ok := detectors[d.Name]; ok {
-			namespace, err := detector.Detect(files)
-			if err != nil {
-				log.WithError(err).WithField("detector", d).Warning("failed while attempting to detect namespace")
-				return nil, err
-			}
-
-			if namespace != nil {
-				log.WithFields(log.Fields{"detector": d, "namespace": namespace.Name}).Debug("detected namespace")
-				namespaces = append(namespaces, database.LayerNamespace{
-					Namespace: *namespace,
-					By:        detector.info,
-				})
-			}
-		} else {
-			log.WithField("detector", d).Fatal("unknown namespace detector")
+		if namespace != nil {
+			log.WithFields(log.Fields{"name": name, "namespace": namespace.Name}).Debug("detected namespace")
+			return namespace, nil
 		}
 	}
 
-	return namespaces, nil
+	return nil, nil
 }
 
-// RequiredFilenames returns all file patterns that will be passed to the
-// given extensions. These patterns are expressed as regexps. Any extension
-// metadata that has non namespace-detector type will be skipped.
-func RequiredFilenames(toUse []database.Detector) (files []string) {
+// RequiredFilenames returns the total list of files required for all
+// registered Detectors.
+func RequiredFilenames() (files []string) {
 	detectorsM.RLock()
 	defer detectorsM.RUnlock()
 
-	for _, d := range toUse {
-		if d.DType != database.NamespaceDetectorType {
-			continue
-		}
-
-		files = append(files, detectors[d.Name].RequiredFilenames()...)
+	for _, detector := range detectors {
+		files = append(files, detector.RequiredFilenames()...)
 	}
 
 	return
-}
-
-// ListDetectors returns the info of all registered namespace detectors.
-func ListDetectors() []database.Detector {
-	r := make([]database.Detector, 0, len(detectors))
-	for _, d := range detectors {
-		r = append(r, d.info)
-	}
-	return r
 }
 
 // TestData represents the data used to test an implementation of Detector.

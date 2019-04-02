@@ -21,10 +21,16 @@
 package imagefmt
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
+	"math"
+	"net/http"
+	"os"
 	"strings"
 	"sync"
+
+	log "github.com/sirupsen/logrus"
 
 	"github.com/coreos/clair/pkg/commonerr"
 	"github.com/coreos/clair/pkg/tarutil"
@@ -32,7 +38,7 @@ import (
 
 var (
 	// ErrCouldNotFindLayer is returned when we could not download or open the layer file.
-	ErrCouldNotFindLayer = commonerr.NewBadRequestError("could not find layer from given path")
+	ErrCouldNotFindLayer = commonerr.NewBadRequestError("could not find layer")
 
 	// insecureTLS controls whether TLS server's certificate chain and hostname are verified
 	// when pulling layers, verified in default.
@@ -95,22 +101,65 @@ func UnregisterExtractor(name string) {
 	delete(extractors, name)
 }
 
-// Extract a set of files as FilesMap from a layer blob.
-func Extract(format string, blobReader io.ReadCloser, filePaths []string) (tarutil.FilesMap, error) {
+// Extract streams an image layer from disk or over HTTP, determines the
+// image format, then extracts the files specified.
+func Extract(format, path string, headers map[string]string, toExtract []string) (tarutil.FilesMap, error) {
+	var layerReader io.ReadCloser
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		// Create a new HTTP request object.
+		request, err := http.NewRequest("GET", path, nil)
+		if err != nil {
+			return nil, ErrCouldNotFindLayer
+		}
+
+		// Set any provided HTTP Headers.
+		if headers != nil {
+			for k, v := range headers {
+				request.Header.Set(k, v)
+			}
+		}
+
+		// Send the request and handle the response.
+		tr := &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureTLS},
+			Proxy:           http.ProxyFromEnvironment,
+		}
+		client := &http.Client{Transport: tr}
+		r, err := client.Do(request)
+		if err != nil {
+			log.WithError(err).Warning("could not download layer")
+			return nil, ErrCouldNotFindLayer
+		}
+
+		// Fail if we don't receive a 2xx HTTP status code.
+		if math.Floor(float64(r.StatusCode/100)) != 2 {
+			log.WithField("status code", r.StatusCode).Warning("could not download layer: expected 2XX")
+			return nil, ErrCouldNotFindLayer
+		}
+
+		layerReader = r.Body
+	} else {
+		var err error
+		layerReader, err = os.Open(path)
+		if err != nil {
+			return nil, ErrCouldNotFindLayer
+		}
+	}
+	defer layerReader.Close()
+
 	if extractor, exists := Extractors()[strings.ToLower(format)]; exists {
-		files, err := extractor.ExtractFiles(blobReader, filePaths)
+		files, err := extractor.ExtractFiles(layerReader, toExtract)
 		if err != nil {
 			return nil, err
 		}
-
 		return files, nil
 	}
 
-	return nil, fmt.Errorf("unsupported image format '%s'", format)
+	return nil, commonerr.NewBadRequestError(fmt.Sprintf("unsupported image format '%s'", format))
 }
 
-// IsSupported checks if a format is supported
-func IsSupported(format string) bool {
-	_, ok := Extractors()[strings.ToLower(format)]
-	return ok
+// SetInsecureTLS sets the insecureTLS to control whether TLS server's certificate chain
+// and hostname are verified when pulling layers.
+func SetInsecureTLS(insecure bool) {
+	insecureTLS = insecure
 }

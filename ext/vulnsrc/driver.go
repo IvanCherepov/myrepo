@@ -27,6 +27,9 @@ var (
 	// ErrFilesystem is returned when a fetcher fails to interact with the local filesystem.
 	ErrFilesystem = errors.New("vulnsrc: something went wrong when interacting with the fs")
 
+	// ErrGitFailure is returned when a fetcher fails to interact with git.
+	ErrGitFailure = errors.New("vulnsrc: something went wrong when interacting with git")
+
 	updatersM sync.RWMutex
 	updaters  = make(map[string]Updater)
 )
@@ -36,10 +39,11 @@ type UpdateResponse struct {
 	FlagName        string
 	FlagValue       string
 	Notes           []string
-	Vulnerabilities []database.VulnerabilityWithAffected
+	Vulnerabilities []database.Vulnerability
 }
 
-// Updater represents anything that can fetch vulnerabilities.
+// Updater represents anything that can fetch vulnerabilities and insert them
+// into a Clair datastore.
 type Updater interface {
 	// Update gets vulnerability updates.
 	Update(database.Datastore) (UpdateResponse, error)
@@ -83,21 +87,4 @@ func Updaters() map[string]Updater {
 	}
 
 	return ret
-}
-
-// ListUpdaters returns the names of registered vulnerability updaters.
-func ListUpdaters() []string {
-	r := []string{}
-	for u := range updaters {
-		r = append(r, u)
-	}
-	return r
-}
-
-// CleanAll is a utility function that calls Clean() on every registered
-// Updater.
-func CleanAll() {
-	for _, updater := range Updaters() {
-		updater.Clean()
-	}
 }

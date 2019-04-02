@@ -17,24 +17,15 @@ package timeutil
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestExpBackoff(t *testing.T) {
-	tests := []struct {
-		prev, max, want time.Duration
-	}{
-		{time.Duration(0), 1 * time.Minute, 1 * time.Second},
-		{1 * time.Second, 1 * time.Minute, 2 * time.Second},
-		{16 * time.Second, 1 * time.Minute, 32 * time.Second},
-		{32 * time.Second, 1 * time.Minute, 1 * time.Minute},
-		{1 * time.Minute, 1 * time.Minute, 1 * time.Minute},
-		{2 * time.Minute, 1 * time.Minute, 1 * time.Minute},
-	}
-
-	for i, tt := range tests {
-		got := ExpBackoff(tt.prev, tt.max)
-		if tt.want != got {
-			t.Errorf("case %d: want=%v got=%v", i, tt.want, got)
-		}
-	}
+	prev := 5 * time.Second
+	max := 8 * time.Second
+	assert.Equal(t, time.Second, ExpBackoff(prev, 0))
+	assert.Equal(t, time.Second, ExpBackoff(0, max))
+	assert.Equal(t, max, ExpBackoff(prev, max))
+	assert.Equal(t, 2*prev, ExpBackoff(prev, time.Hour))
 }

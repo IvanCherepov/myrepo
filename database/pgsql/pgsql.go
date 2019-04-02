@@ -21,43 +21,67 @@ import (
 	"io/ioutil"
 	"net/url"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v2"
 
 	"github.com/hashicorp/golang-lru"
+	"github.com/lib/pq"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/remind101/migrate"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/coreos/clair/database"
 	"github.com/coreos/clair/database/pgsql/migrations"
 	"github.com/coreos/clair/pkg/commonerr"
-	"github.com/coreos/clair/pkg/pagination"
+)
+
+var (
+	promErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "clair_pgsql_errors_total",
+		Help: "Number of errors that PostgreSQL requests generated.",
+	}, []string{"request"})
+
+	promCacheHitsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "clair_pgsql_cache_hits_total",
+		Help: "Number of cache hits that the PostgreSQL backend did.",
+	}, []string{"object"})
+
+	promCacheQueriesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "clair_pgsql_cache_queries_total",
+		Help: "Number of cache queries that the PostgreSQL backend did.",
+	}, []string{"object"})
+
+	promQueryDurationMilliseconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "clair_pgsql_query_duration_milliseconds",
+		Help: "Time it takes to execute the database query.",
+	}, []string{"query", "subquery"})
+
+	promConcurrentLockVAFV = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "clair_pgsql_concurrent_lock_vafv_total",
+		Help: "Number of transactions trying to hold the exclusive Vulnerability_Affects_FeatureVersion lock.",
+	})
 )
 
 func init() {
+	prometheus.MustRegister(promErrorsTotal)
+	prometheus.MustRegister(promCacheHitsTotal)
+	prometheus.MustRegister(promCacheQueriesTotal)
+	prometheus.MustRegister(promQueryDurationMilliseconds)
+	prometheus.MustRegister(promConcurrentLockVAFV)
+
 	database.Register("pgsql", openDatabase)
+}
+
+type Queryer interface {
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
 }
 
 type pgSQL struct {
 	*sql.DB
-
 	cache  *lru.ARCCache
 	config Config
-}
-
-// Begin initiates a transaction to database.
-//
-// The expected transaction isolation level in this implementation is "Read
-// Committed".
-func (pgSQL *pgSQL) Begin() (database.Session, error) {
-	tx, err := pgSQL.DB.Begin()
-	if err != nil {
-		return nil, err
-	}
-	return &pgSession{
-		Tx:  tx,
-		key: pagination.Must(pagination.KeyFromString(pgSQL.config.PaginationKey)),
-	}, nil
 }
 
 // Close closes the database and destroys if ManageDatabaseLifecycle has been specified in
@@ -85,7 +109,6 @@ type Config struct {
 
 	ManageDatabaseLifecycle bool
 	FixturePath             string
-	PaginationKey           string
 }
 
 // openDatabase opens a PostgresSQL-backed Datastore using the given
@@ -109,10 +132,6 @@ func openDatabase(registrableComponentConfig database.RegistrableComponentConfig
 	err = yaml.Unmarshal(bytes, &pg.config)
 	if err != nil {
 		return nil, fmt.Errorf("pgsql: could not load configuration: %v", err)
-	}
-
-	if pg.config.PaginationKey == "" {
-		panic("pagination key should be given")
 	}
 
 	dbName, pgSourceURL, err := parseConnectionString(pg.config.Source)
@@ -160,7 +179,7 @@ func openDatabase(registrableComponentConfig database.RegistrableComponentConfig
 		_, err = pg.DB.Exec(string(d))
 		if err != nil {
 			pg.Close()
-			return nil, fmt.Errorf("pgsql: an error occurred while importing fixtures: %v", err)
+			return nil, fmt.Errorf("pgsql: an error occured while importing fixtures: %v", err)
 		}
 	}
 
@@ -198,7 +217,7 @@ func migrateDatabase(db *sql.DB) error {
 
 	err := migrate.NewPostgresMigrator(db).Exec(migrate.Up, migrations.Migrations...)
 	if err != nil {
-		return fmt.Errorf("pgsql: an error occurred while running migrations: %v", err)
+		return fmt.Errorf("pgsql: an error occured while running migrations: %v", err)
 	}
 
 	log.Info("database migration ran successfully")
@@ -208,7 +227,6 @@ func migrateDatabase(db *sql.DB) error {
 // createDatabase creates a new database.
 // The source parameter should not contain a dbname.
 func createDatabase(source, dbName string) error {
-	log.WithFields(log.Fields{"source": source, "dbName": dbName}).Debug("creating database...")
 	// Open database.
 	db, err := sql.Open("postgres", source)
 	if err != nil {
@@ -250,4 +268,37 @@ func dropDatabase(source, dbName string) error {
 	}
 
 	return nil
+}
+
+// handleError logs an error with an extra description and masks the error if it's an SQL one.
+// This ensures we never return plain SQL errors and leak anything.
+func handleError(desc string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if err == sql.ErrNoRows {
+		return commonerr.ErrNotFound
+	}
+
+	log.WithError(err).WithField("Description", desc).Error("Handled Database Error")
+	promErrorsTotal.WithLabelValues(desc).Inc()
+
+	if _, o := err.(*pq.Error); o || err == sql.ErrTxDone || strings.HasPrefix(err.Error(), "sql:") {
+		return database.ErrBackendException
+	}
+
+	return err
+}
+
+// isErrUniqueViolation determines is the given error is a unique contraint violation.
+func isErrUniqueViolation(err error) bool {
+	pqErr, ok := err.(*pq.Error)
+	return ok && pqErr.Code == "23505"
+}
+
+func observeQueryTime(query, subquery string, start time.Time) {
+	promQueryDurationMilliseconds.
+		WithLabelValues(query, subquery).
+		Observe(float64(time.Since(start).Nanoseconds()) / float64(time.Millisecond))
 }

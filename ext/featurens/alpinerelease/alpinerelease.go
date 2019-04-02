@@ -36,7 +36,7 @@ const (
 var versionRegexp = regexp.MustCompile(`^(\d)+\.(\d)+\.(\d)+$`)
 
 func init() {
-	featurens.RegisterDetector("alpine-release", "1.0", &detector{})
+	featurens.RegisterDetector("alpine-release", &detector{})
 }
 
 type detector struct{}
@@ -62,5 +62,5 @@ func (d detector) Detect(files tarutil.FilesMap) (*database.Namespace, error) {
 }
 
 func (d detector) RequiredFilenames() []string {
-	return []string{"^" + alpineReleasePath}
+	return []string{alpineReleasePath}
 }

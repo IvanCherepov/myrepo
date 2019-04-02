@@ -8,9 +8,8 @@ import (
 )
 
 var (
-	intJSON       = []byte(`12345`)
-	intStringJSON = []byte(`"12345"`)
-	nullIntJSON   = []byte(`{"Int64":12345,"Valid":true}`)
+	intJSON     = []byte(`12345`)
+	nullIntJSON = []byte(`{"Int64":12345,"Valid":true}`)
 )
 
 func TestIntFrom(t *testing.T) {
@@ -39,20 +38,10 @@ func TestUnmarshalInt(t *testing.T) {
 	maybePanic(err)
 	assertInt(t, i, "int json")
 
-	var si Int
-	err = json.Unmarshal(intStringJSON, &si)
-	maybePanic(err)
-	assertInt(t, si, "int string json")
-
 	var ni Int
 	err = json.Unmarshal(nullIntJSON, &ni)
 	maybePanic(err)
-	assertInt(t, ni, "sql.NullInt64 json")
-
-	var bi Int
-	err = json.Unmarshal(floatBlankJSON, &bi)
-	maybePanic(err)
-	assertNullInt(t, bi, "blank json string")
+	assertInt(t, ni, "sq.NullInt64 json")
 
 	var null Int
 	err = json.Unmarshal(nullJSON, &null)
@@ -189,18 +178,6 @@ func TestIntScan(t *testing.T) {
 	err = null.Scan(nil)
 	maybePanic(err)
 	assertNullInt(t, null, "scanned null")
-}
-
-func TestIntValueOrZero(t *testing.T) {
-	valid := NewInt(12345, true)
-	if valid.ValueOrZero() != 12345 {
-		t.Error("unexpected ValueOrZero", valid.ValueOrZero())
-	}
-
-	invalid := NewInt(12345, false)
-	if invalid.ValueOrZero() != 0 {
-		t.Error("unexpected ValueOrZero", invalid.ValueOrZero())
-	}
 }
 
 func assertInt(t *testing.T, i Int, from string) {

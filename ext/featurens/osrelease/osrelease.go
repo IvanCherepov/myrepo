@@ -34,8 +34,6 @@ var (
 	osReleaseOSRegexp      = regexp.MustCompile(`^ID=(.*)`)
 	osReleaseVersionRegexp = regexp.MustCompile(`^VERSION_ID=(.*)`)
 
-	filenames = []string{"etc/os-release", "usr/lib/os-release"}
-
 	// blacklistFilenames are files that should exclude this detector.
 	blacklistFilenames = []string{
 		"etc/oracle-release",
@@ -47,7 +45,7 @@ var (
 type detector struct{}
 
 func init() {
-	featurens.RegisterDetector("os-release", "1.0", &detector{})
+	featurens.RegisterDetector("os-release", &detector{})
 }
 
 func (d detector) Detect(files tarutil.FilesMap) (*database.Namespace, error) {
@@ -59,7 +57,7 @@ func (d detector) Detect(files tarutil.FilesMap) (*database.Namespace, error) {
 		}
 	}
 
-	for _, filePath := range filenames {
+	for _, filePath := range d.RequiredFilenames() {
 		f, hasFile := files[filePath]
 		if !hasFile {
 			continue
@@ -86,7 +84,7 @@ func (d detector) Detect(files tarutil.FilesMap) (*database.Namespace, error) {
 	switch OS {
 	case "debian", "ubuntu":
 		versionFormat = dpkg.ParserName
-	case "centos", "rhel", "fedora", "amzn", "ol", "oracle", "opensuse", "sles":
+	case "centos", "rhel", "fedora", "amzn", "ol", "oracle":
 		versionFormat = rpm.ParserName
 	default:
 		return nil, nil
@@ -102,5 +100,5 @@ func (d detector) Detect(files tarutil.FilesMap) (*database.Namespace, error) {
 }
 
 func (d detector) RequiredFilenames() []string {
-	return []string{"^(etc|usr/lib)/os-release"}
+	return []string{"etc/os-release", "usr/lib/os-release"}
 }

@@ -32,7 +32,7 @@ func TestUbuntuParser(t *testing.T) {
 	path := filepath.Join(filepath.Dir(filename))
 
 	// Test parsing testdata/fetcher_
-	testData, _ := os.Open(filepath.Join(path, "/testdata/fetcher_ubuntu_test.txt"))
+	testData, _ := os.Open(path + "/testdata/fetcher_ubuntu_test.txt")
 	defer testData.Close()
 	vulnerability, unknownReleases, err := parseUbuntuCVE(testData)
 	if assert.Nil(t, err) {
@@ -44,40 +44,41 @@ func TestUbuntuParser(t *testing.T) {
 		_, hasUnkownRelease := unknownReleases["unknown"]
 		assert.True(t, hasUnkownRelease)
 
-		expectedFeatures := []database.AffectedFeature{
+		expectedFeatureVersions := []database.FeatureVersion{
 			{
-				FeatureType: affectedType,
-				Namespace: database.Namespace{
-					Name:          "ubuntu:14.04",
-					VersionFormat: dpkg.ParserName,
+				Feature: database.Feature{
+					Namespace: database.Namespace{
+						Name:          "ubuntu:14.04",
+						VersionFormat: dpkg.ParserName,
+					},
+					Name: "libmspack",
 				},
-				FeatureName:     "libmspack",
-				AffectedVersion: versionfmt.MaxVersion,
+				Version: versionfmt.MaxVersion,
 			},
 			{
-				FeatureType: affectedType,
-				Namespace: database.Namespace{
-					Name:          "ubuntu:15.04",
-					VersionFormat: dpkg.ParserName,
+				Feature: database.Feature{
+					Namespace: database.Namespace{
+						Name:          "ubuntu:15.04",
+						VersionFormat: dpkg.ParserName,
+					},
+					Name: "libmspack",
 				},
-				FeatureName:     "libmspack",
-				FixedInVersion:  "0.4-3",
-				AffectedVersion: "0.4-3",
+				Version: "0.4-3",
 			},
 			{
-				FeatureType: affectedType,
-				Namespace: database.Namespace{
-					Name:          "ubuntu:15.10",
-					VersionFormat: dpkg.ParserName,
+				Feature: database.Feature{
+					Namespace: database.Namespace{
+						Name:          "ubuntu:15.10",
+						VersionFormat: dpkg.ParserName,
+					},
+					Name: "libmspack-anotherpkg",
 				},
-				FeatureName:     "libmspack-anotherpkg",
-				FixedInVersion:  "0.1",
-				AffectedVersion: "0.1",
+				Version: "0.1",
 			},
 		}
 
-		for _, expectedFeature := range expectedFeatures {
-			assert.Contains(t, vulnerability.Affected, expectedFeature)
+		for _, expectedFeatureVersion := range expectedFeatureVersions {
+			assert.Contains(t, vulnerability.FixedIn, expectedFeatureVersion)
 		}
 	}
 }
