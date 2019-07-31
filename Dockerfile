@@ -1,29 +1,33 @@
-# Copyright 2017 clair authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Galaxy - NGS
 
-FROM golang:1.10-alpine
+FROM bgruening/galaxy-stable:19.01
 
-VOLUME /config
-EXPOSE 6060 6061
+MAINTAINER Vesselin Baev, vebaev@plantgene.eu
 
-ADD .   /go/src/github.com/coreos/clair/
-WORKDIR /go/src/github.com/coreos/clair/
+# Enable Conda dependency resolution
+ENV GALAXY_CONFIG_BRAND="Galaxy NGS" \
+    GALAXY_CONFIG_CONDA_AUTO_INSTALL=True
 
-RUN apk add --no-cache git rpm xz curl && \
-    export CLAIR_VERSION=$(git describe --always --tags --dirty) && \
-    go install -ldflags "-X github.com/coreos/clair/pkg/version.Version=$CLAIR_VERSION" -v github.com/coreos/clair/cmd/clair && \
-    mv /go/bin/clair /clair && \
-    rm -rf /go /usr/local/go
+# Install tools
+COPY NGS_1.yaml $GALAXY_ROOT/tools_1.yaml
+COPY NGS_2.yaml $GALAXY_ROOT/tools_2.yaml
 
-ENTRYPOINT ["/clair"]
+# Split into multiple layers
+RUN install-tools $GALAXY_ROOT/tools_1.yaml && \
+    /tool_deps/_conda/bin/conda clean --tarballs --yes > /dev/null && \
+    rm /export/galaxy-central/ -rf
+
+RUN install-tools $GALAXY_ROOT/tools_2.yaml && \
+    /tool_deps/_conda/bin/conda clean --tarballs --yes > /dev/null && \
+    rm /export/galaxy-central/ -rf
+
+
+# Add Container Style
+ENV GALAXY_CONFIG_WELCOME_URL=$GALAXY_CONFIG_DIR/web/welcome.html
+COPY config/welcome.html $GALAXY_CONFIG_DIR/web/welcome.html
+COPY config/welcome_NGS.png $GALAXY_CONFIG_DIR/web/welcome_NGS.png
+
+
+# Add Multi CPU job_conf file (--ntasks=16)
+#ENV GALAXY_CONFIG_JOB_CONFIG_FILE=$GALAXY_CONFIG_DIR/job_conf.xml
+#COPY config/job_conf.xml $GALAXY_CONFIG_DIR/job_conf.xml
