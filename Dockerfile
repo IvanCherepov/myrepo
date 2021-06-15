@@ -1,1 +1,1 @@
-FROM debian
+FROM quay.io/baselibrary/ubuntu:
