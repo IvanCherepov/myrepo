@@ -1,1 +1,1 @@
-FROM quay.io/baselibrary/ubuntu:
+FROM quay.io/baselibrary/ubuntu
